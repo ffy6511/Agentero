@@ -38,6 +38,7 @@ import {
 	type MouseEvent as ReactMouseEvent,
 	type PointerEvent as ReactPointerEvent,
 	type RefObject,
+	useCallback,
 	useEffect,
 	useMemo,
 	useRef,
@@ -55,8 +56,11 @@ import {
 	pdfTileDpr,
 } from "@/components/viewer/pdf/constants";
 import { EMBED_PAGE_ATTR } from "@/components/viewer/pdf/coords";
-import type { PdfTextLink } from "@/components/viewer/pdf/layers/citation-links";
-import { CitationLinkLayer } from "@/components/viewer/pdf/layers/citation-links";
+import {
+	CitationLinkLayer,
+	linkAnnotationUri,
+	type PdfTextLink,
+} from "@/components/viewer/pdf/layers/citation-links";
 import { CommentCardsLayer } from "@/components/viewer/pdf/layers/comment-cards-layer";
 import { HighlightAnnotationMenu } from "@/components/viewer/pdf/layers/highlight-annotation-menu";
 import { LayoutTranslateOverlay } from "@/components/viewer/pdf/layers/layout-translate-overlay";
@@ -95,6 +99,10 @@ import {
 	type PdfLayoutRegion,
 	type PointerOrigin,
 } from "@/lib/pdf/layout";
+import type {
+	PreservedLinkAssignment,
+	TranslateLinkBox,
+} from "@/lib/pdf/layout/translated-links";
 import {
 	PDF_ANNOTATION_DARK_CLASS,
 	PDF_PAGE_RASTER_DARK_CLASS,
@@ -896,6 +904,80 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 		</div>
 	);
 
+	const translateLinkBoxes = useMemo(() => {
+		const zoom = zoomRef.current || 1;
+		const pageWidthPt = width / zoom;
+		const pageHeightPt = height / zoom;
+		if (pageWidthPt <= 0 || pageHeightPt <= 0) return [] as TranslateLinkBox[];
+		const boxes: TranslateLinkBox[] = [];
+		const norm = (rect: {
+			origin: { x: number; y: number };
+			size: { width: number; height: number };
+		}): TranslateLinkBox["box"] => ({
+			x: rect.origin.x / pageWidthPt,
+			y: rect.origin.y / pageHeightPt,
+			w: rect.size.width / pageWidthPt,
+			h: rect.size.height / pageHeightPt,
+		});
+		for (const link of marks.citationLinks.get(pageIndex) ?? []) {
+			const url = linkAnnotationUri(link);
+			boxes.push({
+				key: link.id,
+				kind: url ? "url" : "goto",
+				url: url ?? undefined,
+				box: norm(link.rect),
+			});
+		}
+		for (const link of marks.textLinks.get(pageIndex) ?? []) {
+			boxes.push({
+				key: `text:${link.url}:${link.rect.origin.x}:${link.rect.origin.y}`,
+				kind: "url",
+				url: link.url,
+				box: norm(link.rect),
+			});
+		}
+		return boxes;
+	}, [height, marks.citationLinks, marks.textLinks, pageIndex, width, zoomRef]);
+	const citationById = useMemo(() => {
+		const map = new Map<string, PdfLinkAnnoObject>();
+		for (const link of marks.citationLinks.get(pageIndex) ?? []) {
+			map.set(link.id, link);
+		}
+		return map;
+	}, [marks.citationLinks, pageIndex]);
+	const openTranslatedLink = useCallback(
+		(assignment: PreservedLinkAssignment) => {
+			if (assignment.key) {
+				const link = citationById.get(assignment.key);
+				if (link) {
+					const url = linkAnnotationUri(link);
+					if (url) handlers.onTextLinkActivate(url);
+					else handlers.onCitationActivate(link);
+					return;
+				}
+			}
+			if (assignment.url) handlers.onTextLinkActivate(assignment.url);
+		},
+		[citationById, handlers],
+	);
+	const hoverTranslatedLink = useCallback(
+		(
+			assignment: PreservedLinkAssignment | null,
+			point: { x: number; y: number; top: number; bottom: number } | null,
+		) => {
+			if (!assignment?.key) {
+				handlers.onCitationHover(null);
+				return;
+			}
+			const link = citationById.get(assignment.key);
+			if (!link || linkAnnotationUri(link)) {
+				handlers.onCitationHover(null);
+				return;
+			}
+			handlers.onCitationHover(link, point ?? undefined);
+		},
+		[citationById, handlers],
+	);
 	const translateOverlay =
 		translationVisible && layoutTranslateOnPage ? (
 			<LayoutTranslateOverlay
@@ -906,6 +988,9 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 				layoutRegions={layout.rawRegionsByPage.get(pageIndex)}
 				highlightQuotes={highlightQuotes}
 				sentenceRectsByItemId={layout.sentenceRectsByItemId}
+				links={translateLinkBoxes}
+				onOpenLink={openTranslatedLink}
+				onHoverLink={hoverTranslatedLink}
 			/>
 		) : null;
 

@@ -17,6 +17,13 @@ import { isLayoutTranslateHeadingKind } from "@/lib/pdf/layout/labels";
 import { layoutTranslateSentenceNodes } from "@/lib/pdf/layout/layout-sentences";
 import type { LayoutTranslateItem } from "@/lib/pdf/layout/layout-translate";
 import { isLayoutTranslateItemPainted } from "@/lib/pdf/layout/layout-translate-reliable";
+import {
+	assignmentsWithin,
+	assignPreservedLinks,
+	claimTranslateLinks,
+	type PreservedLinkAssignment,
+	type TranslateLinkBox,
+} from "@/lib/pdf/layout/translated-links";
 import type { PdfLayoutRegion } from "@/lib/pdf/layout/types";
 import {
 	PDF_PAGE_RASTER_DARK_CLASS,
@@ -45,6 +52,17 @@ type LayoutTranslateOverlayProps = {
 		string,
 		readonly (readonly PdfHighlightRect[])[]
 	>;
+	/**
+	 * Page link annotations and bare URLs, in normalized page fractions.
+	 * Preserved citation / ref / URL tokens inside a block become the hit
+	 * targets so the English rectangles can stay under the glyphs.
+	 */
+	links?: readonly TranslateLinkBox[];
+	onOpenLink?: (assignment: PreservedLinkAssignment) => void;
+	onHoverLink?: (
+		assignment: PreservedLinkAssignment | null,
+		point: { x: number; y: number; top: number; bottom: number } | null,
+	) => void;
 };
 
 const LINE_HEIGHT = 1.25;
@@ -334,7 +352,107 @@ type ExactFitParagraphProps = {
 	paperDark: boolean;
 	/** Sentence indexes whose translation should show the highlight color. */
 	tintedSentences?: ReadonlyMap<number, HighlightColor>;
+	linkAssignments?: readonly PreservedLinkAssignment[];
+	onOpenLink?: (assignment: PreservedLinkAssignment) => void;
+	onHoverLink?: LayoutTranslateOverlayProps["onHoverLink"];
 };
+
+function sentenceSlices(
+	text: string,
+	nodes: readonly { index: number; text: string }[],
+	gap: string,
+): { index: number; text: string; start: number }[] {
+	const slices: { index: number; text: string; start: number }[] = [];
+	let cursor = 0;
+	for (let index = 0; index < nodes.length; index++) {
+		const node = nodes[index];
+		if (!node) continue;
+		const found = text.indexOf(node.text, cursor);
+		const start = found >= 0 ? found : cursor;
+		slices.push({ index: node.index, text: node.text, start });
+		cursor = start + node.text.length + gap.length;
+	}
+	return slices;
+}
+
+function linkPoint(element: HTMLElement) {
+	const box = element.getBoundingClientRect();
+	return {
+		x: box.left + box.width / 2,
+		y: box.bottom,
+		top: box.top,
+		bottom: box.bottom,
+	};
+}
+
+/**
+ * Render `text`, wrapping preserved link tokens. A drag that produced a
+ * selection does not navigate.
+ */
+function LinkifiedText({
+	text,
+	assignments,
+	onOpenLink,
+	onHoverLink,
+}: {
+	text: string;
+	assignments: readonly PreservedLinkAssignment[] | undefined;
+	onOpenLink?: (assignment: PreservedLinkAssignment) => void;
+	onHoverLink?: LayoutTranslateOverlayProps["onHoverLink"];
+}) {
+	if (!assignments?.length) return text;
+	const parts: Array<
+		| { key: string; text: string }
+		| { key: string; assignment: PreservedLinkAssignment }
+	> = [];
+	let cursor = 0;
+	for (const assignment of assignments) {
+		if (assignment.start < cursor || assignment.end > text.length) continue;
+		if (text.slice(assignment.start, assignment.end) !== assignment.text) {
+			continue;
+		}
+		if (assignment.start > cursor) {
+			parts.push({
+				key: `t-${cursor}`,
+				text: text.slice(cursor, assignment.start),
+			});
+		}
+		parts.push({
+			key: `l-${assignment.start}-${assignment.key ?? assignment.url ?? "url"}`,
+			assignment,
+		});
+		cursor = assignment.end;
+	}
+	if (cursor === 0) return text;
+	if (cursor < text.length) {
+		parts.push({ key: `t-${cursor}`, text: text.slice(cursor) });
+	}
+	return parts.map((part) =>
+		"text" in part ? (
+			<Fragment key={part.key}>{part.text}</Fragment>
+		) : (
+			<a
+				key={part.key}
+				href={part.assignment.url ?? "#"}
+				data-translated-link={part.assignment.key ?? part.assignment.url ?? ""}
+				className="cursor-pointer text-inherit underline decoration-current/60 underline-offset-2"
+				onClick={(event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					if (window.getSelection()?.toString()) return;
+					onOpenLink?.(part.assignment);
+				}}
+				onPointerEnter={(event) => {
+					if ((event.buttons & 1) === 1) return;
+					onHoverLink?.(part.assignment, linkPoint(event.currentTarget));
+				}}
+				onPointerLeave={() => onHoverLink?.(null, null)}
+			>
+				{part.assignment.text}
+			</a>
+		),
+	);
+}
 
 /**
  * The heuristic above is fast but font metrics differ across Windows/macOS,
@@ -352,9 +470,15 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 	isHeading,
 	paperDark,
 	tintedSentences,
+	linkAssignments,
+	onOpenLink,
+	onHoverLink,
 }: ExactFitParagraphProps) {
 	const ref = useRef<HTMLParagraphElement>(null);
 	const sentenceNodes = layoutTranslateSentenceNodes(text, sentences);
+	const slices = sentenceNodes
+		? sentenceSlices(text, sentenceNodes.nodes, sentenceNodes.gap)
+		: null;
 
 	useLayoutEffect(() => {
 		const element = ref.current;
@@ -427,30 +551,46 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 				overflowWrap: "normal",
 			}}
 		>
-			{sentenceNodes
-				? sentenceNodes.nodes.map((node, index) => (
-						<Fragment key={node.index}>
-							{index > 0 ? sentenceNodes.gap : null}
-							<span
-								data-sentence={node.index}
-								className={
-									tintedSentences?.has(node.index) ? "rounded-[1px]" : undefined
-								}
-								style={
-									tintedSentences?.has(node.index)
-										? {
-												backgroundColor: highlightFill(
-													tintedSentences.get(node.index) ?? "yellow",
-												),
-											}
-										: undefined
-								}
-							>
-								{node.text}
-							</span>
-						</Fragment>
-					))
-				: text}
+			{slices && sentenceNodes ? (
+				slices.map((node, index) => (
+					<Fragment key={node.index}>
+						{index > 0 ? sentenceNodes.gap : null}
+						<span
+							data-sentence={node.index}
+							className={
+								tintedSentences?.has(node.index) ? "rounded-[1px]" : undefined
+							}
+							style={
+								tintedSentences?.has(node.index)
+									? {
+											backgroundColor: highlightFill(
+												tintedSentences.get(node.index) ?? "yellow",
+											),
+										}
+									: undefined
+							}
+						>
+							<LinkifiedText
+								text={node.text}
+								assignments={assignmentsWithin(
+									linkAssignments ?? [],
+									node.start,
+									node.start + node.text.length,
+								)}
+								onOpenLink={onOpenLink}
+								onHoverLink={onHoverLink}
+							/>
+						</span>
+					</Fragment>
+				))
+			) : (
+				<LinkifiedText
+					text={text}
+					assignments={linkAssignments}
+					onOpenLink={onOpenLink}
+					onHoverLink={onHoverLink}
+				/>
+			)}
 		</p>
 	);
 });
@@ -466,6 +606,9 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 	layoutRegions,
 	highlightQuotes,
 	sentenceRectsByItemId,
+	links,
+	onOpenLink,
+	onHoverLink,
 }: LayoutTranslateOverlayProps) {
 	const onPage = useMemo(
 		() =>
@@ -495,6 +638,10 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 		}
 		return map;
 	}, [highlightQuotes, onPage, sentenceRectsByItemId]);
+	const linksByItem = useMemo(
+		() => claimTranslateLinks(onPage, links ?? []),
+		[links, onPage],
+	);
 	if (onPage.length === 0) return null;
 
 	return (
@@ -505,6 +652,10 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 						? (item.translated ?? "…")
 						: (item.translated ?? "");
 				const isHeading = isLayoutTranslateHeadingKind(item.kind);
+				const linkAssignments = assignPreservedLinks(
+					text,
+					linksByItem.get(item.id) ?? [],
+				);
 				const fontSize = fontSizeForLayoutTranslateItem(
 					item,
 					pageWidthPx,
@@ -580,6 +731,9 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 									isHeading={isHeading}
 									paperDark={tone === "dark"}
 									tintedSentences={tintByItem.get(item.id)}
+									linkAssignments={linkAssignments}
+									onOpenLink={onOpenLink}
+									onHoverLink={onHoverLink}
 								/>
 							</div>
 						</div>

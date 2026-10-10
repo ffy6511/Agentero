@@ -233,6 +233,19 @@ export const CitationLinkLayer = memo(function CitationLinkLayer({
  * Coordinates are PDF-native (origin bottom-left). `pdfX` is null when the
  * destination only pins a row (FitH) or the viewer does not expose x.
  */
+/** URI action target, when this link opens an external URL. */
+export function linkAnnotationUri(link: PdfLinkAnnoObject): string | null {
+	const target = link.target;
+	if (
+		target?.type === "action" &&
+		target.action.type === PdfActionType.URI &&
+		target.action.uri
+	) {
+		return target.action.uri;
+	}
+	return null;
+}
+
 export function getLinkDestination(
 	target: PdfLinkTarget | undefined,
 ): { pageIndex: number; pdfX: number | null; pdfY: number } | null {
