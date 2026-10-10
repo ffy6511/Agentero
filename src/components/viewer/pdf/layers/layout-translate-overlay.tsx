@@ -75,6 +75,38 @@ const FS_MAX = 20;
 const FIT_SAFETY = 0.97;
 /** One-line heading box height → font size (box ≈ ascender..descender). */
 const HEADING_EM_PER_BOX = 0.9;
+/** Section titles should outrank body text on the same page. */
+export const HEADING_TO_BODY_SIZE_RATIO = 1.35;
+
+/**
+ * Median of body block sizes on a page. Empty when the page has no painted
+ * body blocks yet (still translating / title-only).
+ */
+export function bodyReferenceFontSize(
+	sizes: readonly number[],
+): number | undefined {
+	const usable = sizes
+		.filter((n) => Number.isFinite(n) && n > FS_MIN)
+		.sort((a, b) => a - b);
+	if (usable.length === 0) return undefined;
+	// Prefer the upper quartile so short/dense outliers do not drag section
+	// titles back toward body size.
+	const idx = Math.min(usable.length - 1, Math.ceil(usable.length * 0.75) - 1);
+	return usable[Math.max(0, idx)];
+}
+
+/** Raise a heading to at least `bodyRef × HEADING_TO_BODY_SIZE_RATIO`. */
+export function applyHeadingBodyFloor(
+	headingFs: number,
+	bodyRefPx: number | undefined,
+): number {
+	if (bodyRefPx === undefined || bodyRefPx <= 0) return headingFs;
+	return Math.min(
+		FS_MAX,
+		Math.max(headingFs, bodyRefPx * HEADING_TO_BODY_SIZE_RATIO),
+	);
+}
+
 const DOM_FIT_ABSOLUTE_MIN = 1;
 const DOM_FIT_EPSILON_PX = 0.5;
 /**
@@ -704,36 +736,57 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 	onOpenLink,
 	onHoverLink,
 }: LayoutTranslateOverlayProps) {
-	const onPage = useMemo(
-		() =>
-			items.filter(isLayoutTranslateItemPainted).map((item) => {
-				const paintText =
-					item.status === "running"
-						? (item.translated ?? "…")
-						: (item.translated ?? "");
-				// Size from the source box. Expansion below must not inflate a
-				// heading just because the translation borrowed extra height.
-				const paintFontSize = fontSizeForLayoutTranslateItem(
+	const onPage = useMemo(() => {
+		const painted = items.filter(isLayoutTranslateItemPainted).map((item) => {
+			const paintText =
+				item.status === "running"
+					? (item.translated ?? "…")
+					: (item.translated ?? "");
+			// Size from the source box. Expansion below must not inflate a
+			// heading just because the translation borrowed extra height.
+			const paintFontSize = fontSizeForLayoutTranslateItem(
+				item,
+				pageWidthPx,
+				pageHeightPx,
+				paintText,
+			);
+			return { item, paintText, paintFontSize };
+		});
+		// Same-page body reference so section titles outrank paragraphs even
+		// when the layout detector hugged the heading glyphs (tiny bbox).
+		// Tall paragraph boxes only — captions, author lines and footnotes are
+		// often kind "text" but sized like microcopy and would collapse the floor.
+		const bodyCandidates = painted.filter(
+			({ item }) =>
+				!isLayoutTranslateHeadingKind(item.kind) &&
+				item.bbox.h >= 0.04 &&
+				item.source.replace(/\s+/g, "").length >= 100,
+		);
+		const bodyRef = bodyReferenceFontSize(
+			bodyCandidates.map(({ paintFontSize }) => paintFontSize),
+		);
+		return painted.map(({ item, paintText, paintFontSize: baseFs }) => {
+			const isHeading = isLayoutTranslateHeadingKind(item.kind);
+			// Doc titles already dwarf body; page chrome (date, logo) must not be
+			// inflated. Only short section strips need the body-relative floor.
+			const sectionStrip = isHeading && item.bbox.h < 0.035;
+			const paintFontSize = sectionStrip
+				? applyHeadingBodyFloor(baseFs, bodyRef)
+				: baseFs;
+			return {
+				...item,
+				bbox: expandLayoutTranslateBbox(
 					item,
-					pageWidthPx,
-					pageHeightPx,
-					paintText,
-				);
-				return {
-					...item,
-					bbox: expandLayoutTranslateBbox(
-						item,
-						layoutRegions,
-						isLayoutTranslateHeadingKind(item.kind)
-							? { pageWidthPx, pageHeightPx, fontSize: paintFontSize }
-							: undefined,
-					),
-					paintText,
-					paintFontSize,
-				};
-			}),
-		[items, layoutRegions, pageHeightPx, pageWidthPx],
-	);
+					layoutRegions,
+					isHeading
+						? { pageWidthPx, pageHeightPx, fontSize: paintFontSize }
+						: undefined,
+				),
+				paintText,
+				paintFontSize,
+			};
+		});
+	}, [items, layoutRegions, pageHeightPx, pageWidthPx]);
 	const tintByItem = useMemo(() => {
 		const map = new Map<string, ReadonlyMap<number, HighlightColor>>();
 		if (!highlightQuotes?.length) return map;

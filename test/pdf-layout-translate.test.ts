@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	applyHeadingBodyFloor,
+	bodyReferenceFontSize,
 	expandLayoutTranslateBbox,
 	fontSizeForLayoutTranslateBox,
+	HEADING_TO_BODY_SIZE_RATIO,
 } from "@/components/viewer/pdf/layers/layout-translate-overlay";
 import {
 	applyLayoutTranslateSidecar,
@@ -316,6 +319,22 @@ describe("fontSizeForLayoutTranslateBox", () => {
 		);
 		expect(fs).toBeGreaterThan(7);
 		expect(fs).toBeLessThanOrEqual(20);
+	});
+});
+
+describe("heading body floor", () => {
+	it("uses the median body size as the page reference", () => {
+		expect(bodyReferenceFontSize([8, 9, 10, 12])).toBe(10);
+		expect(bodyReferenceFontSize([8, 10, 12])).toBe(12);
+		expect(bodyReferenceFontSize([])).toBeUndefined();
+	});
+
+	it("raises a short section title to body × 1.35", () => {
+		const body = 10;
+		const raised = applyHeadingBodyFloor(7.6, body);
+		expect(raised).toBeCloseTo(body * HEADING_TO_BODY_SIZE_RATIO, 5);
+		expect(applyHeadingBodyFloor(14, body)).toBe(14);
+		expect(applyHeadingBodyFloor(8, undefined)).toBe(8);
 	});
 });
 
