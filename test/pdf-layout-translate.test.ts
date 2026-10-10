@@ -299,6 +299,24 @@ describe("fontSizeForLayoutTranslateBox", () => {
 		expect(Math.abs(chinese - english) / english).toBeLessThanOrEqual(0.02);
 		expect(chinese).toBeGreaterThan(shrunk);
 	});
+
+	it("sizes a one-line heading from the raw box when padding would hit the floor", () => {
+		// A section-title strip is about one em tall. Subtracting paragraph
+		// padding used to clamp "1. Introduction" to FS_MIN, below body text.
+		const pageW = 600;
+		const pageH = 400;
+		const bbox = { x: 0.12, y: 0.2, w: 0.4, h: 12 / pageH };
+		const fs = fontSizeForLayoutTranslateBox(
+			bbox,
+			pageW,
+			pageH,
+			"1. Introduction",
+			"1. 介绍",
+			{ heading: true },
+		);
+		expect(fs).toBeGreaterThan(7);
+		expect(fs).toBeLessThanOrEqual(20);
+	});
 });
 
 describe("expandLayoutTranslateBbox", () => {

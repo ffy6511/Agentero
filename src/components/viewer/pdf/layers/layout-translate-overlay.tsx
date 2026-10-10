@@ -73,6 +73,8 @@ const LINE_HEIGHT = 1.25;
 const FS_MIN = 4;
 const FS_MAX = 20;
 const FIT_SAFETY = 0.97;
+/** One-line heading box height → font size (box ≈ ascender..descender). */
+const HEADING_EM_PER_BOX = 0.9;
 const DOM_FIT_ABSOLUTE_MIN = 1;
 const DOM_FIT_EPSILON_PX = 0.5;
 /**
@@ -300,6 +302,21 @@ export function fontSizeForLayoutTranslateBox(
 		// the smaller size that would cram a longer translation into the same box.
 		if (srcLines === 1 && src.length < 140 && h < 56) {
 			fs = Math.max(fs, Math.min(FS_MAX, (h / LINE_HEIGHT) * 0.92));
+		}
+		// Layout boxes for a short section title hug the glyphs (about one em
+		// tall). Subtracting paragraph padding from such a box, or a pessimistic
+		// line estimate at the 8px probe, collapsed "1. Introduction" to FS_MIN at
+		// normal zoom, smaller than the body text. Size from the raw box height.
+		// Only for boxes that really hold one source line at that size; multi-line
+		// titles, logos and author strips keep the fitted size, and untranslated
+		// strips (dates, ids) keep the size that already fits their box.
+		const rawFs = Math.min(FS_MAX, bbox.h * pageHeightPx * HEADING_EM_PER_BOX);
+		if (
+			rawFs > fs &&
+			display !== src &&
+			estimateLineCount(src, w * 1.2, rawFs, srcEm) === 1
+		) {
+			fs = rawFs;
 		}
 		return Math.max(FS_MIN, Math.min(FS_MAX, fs));
 	}
