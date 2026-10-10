@@ -139,7 +139,13 @@ export function usePdfSelectionActions({
 	const handleMenuAsk = useCallback(() => {
 		const menu = selectionMenuRef.current;
 		if (!menu) return;
-		const anchor = menu.anchor;
+		const translatedRects = menu.visiblePages?.find(
+			(page) => page.pageIndex === menu.anchor.page - 1,
+		)?.rects;
+		const anchor =
+			translatedRects && translatedRects.length > 0
+				? { ...menu.anchor, translatedRects }
+				: menu.anchor;
 		const translation = menu.pairedTranslation;
 		closeSelectionMenu();
 		startFromAnchor(anchor, translation);

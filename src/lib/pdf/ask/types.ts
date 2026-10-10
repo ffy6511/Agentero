@@ -23,6 +23,12 @@ export type PdfAskAnchor = {
 	trigger: PdfAskTrigger;
 	/** Visual crop semantics for multimodal formula/figure explanations. */
 	visualKind?: PdfAskVisualKind;
+	/**
+	 * Page-fraction boxes of the translated text that was selected. Present
+	 * only when quick chat started on the translation overlay. English glyph
+	 * boxes stay in `rects`.
+	 */
+	translatedRects?: PdfAskNormalizedRect[];
 };
 
 export type PdfAskMessage = {

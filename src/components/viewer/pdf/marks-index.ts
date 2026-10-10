@@ -105,6 +105,10 @@ export function buildMarksIndex({
 			ended: anchor.ended,
 			overText: pinObscuresBodyText(pin, pageText),
 			side: pin.side,
+			rects: anchor.rects,
+			...(anchor.translatedRects?.length
+				? { translatedRects: anchor.translatedRects }
+				: {}),
 		});
 	}
 	for (const translate of translates) {
@@ -195,4 +199,36 @@ export function commentForVisibleTranslation(
 	let anchorY = rects[0]?.y ?? comment.anchorY;
 	for (const rect of rects) anchorY = Math.min(anchorY, rect.y);
 	return { ...comment, rects, anchorY };
+}
+
+/**
+ * Boxes for a quick-chat highlight. Translation mode uses the boxes the reader
+ * selected on the overlay; otherwise the English glyph boxes.
+ */
+export function askHighlightRects(
+	anchor: {
+		rects?: readonly NormalizedRect[] | null;
+		translatedRects?: readonly NormalizedRect[] | null;
+	},
+	translationVisible: boolean,
+): readonly NormalizedRect[] {
+	if (translationVisible && anchor.translatedRects?.length) {
+		return anchor.translatedRects;
+	}
+	return anchor.rects ?? [];
+}
+
+/**
+ * Move an ask gutter pin next to the translated selection while that
+ * translation is showing. English pin geometry is unchanged.
+ */
+export function selectionPinForVisibleTranslation(
+	pin: SelectionPin,
+	translationVisible: boolean,
+): SelectionPin {
+	const rects = pin.translatedRects;
+	if (pin.kind !== "ask" || !translationVisible || !rects?.length) return pin;
+	let y = rects[0]?.y ?? pin.y;
+	for (const rect of rects) y = Math.min(y, rect.y);
+	return y === pin.y ? pin : { ...pin, y };
 }

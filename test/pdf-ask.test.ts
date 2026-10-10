@@ -90,6 +90,36 @@ describe("pdf-ask schema", () => {
 		expect(parsePdfAskThread({ version: 2, id: "x" })).toBeNull();
 	});
 
+	it("keeps translated selection boxes and ignores an unusable list", () => {
+		const raw = {
+			version: 1,
+			kind: "ask",
+			id: "t1",
+			paperPath: "papers/1706.03762",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			status: "open",
+			anchor: {
+				page: 2,
+				rects: [{ x: 0.1, y: 0.2, w: 0.3, h: 0.05 }],
+				quote: "attention is all you need",
+				trigger: "selection",
+				translatedRects: [{ x: 0.2, y: 0.31, w: 0.18, h: 0.02 }],
+			},
+			messages: [],
+		};
+		expect(parsePdfAskThread(raw)?.anchor.translatedRects).toEqual([
+			{ x: 0.2, y: 0.31, w: 0.18, h: 0.02 },
+		]);
+		const broken = parsePdfAskThread({
+			...raw,
+			anchor: { ...raw.anchor, translatedRects: "nope" },
+		});
+		expect(broken).not.toBeNull();
+		expect(broken?.anchor.translatedRects).toBeUndefined();
+		expect(broken?.anchor.rects).toEqual(raw.anchor.rects);
+	});
+
 	it("builds an ask conversation card from Agent-panel selection turn", () => {
 		const thread = createAskThreadFromAgentSelection({
 			paperPath: "papers/transformer",

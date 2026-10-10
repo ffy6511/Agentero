@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { keepUnsavedVisualDrafts } from "@/components/viewer/pdf/hooks/use-pdf-marks-io";
 import {
+	askHighlightRects,
 	buildMarksIndex,
 	commentForVisibleTranslation,
+	selectionPinForVisibleTranslation,
 } from "@/components/viewer/pdf/marks-index";
 import type { PdfVisualSessionTrace } from "@/lib/pdf/agent-trace";
 import type { PdfHighlight } from "@/lib/pdf/highlight/types";
@@ -100,6 +102,36 @@ describe("buildMarksIndex", () => {
 		expect(shown.anchorY).toBe(0.3);
 		expect(shown.rects).toEqual(comment.translatedRects);
 		expect(commentForVisibleTranslation(comment, false).anchorY).toBe(0.5);
+	});
+
+	it("paints an ask selection from translated boxes and shifts the pin beside them", () => {
+		const index = buildMarksIndex({
+			highlights: [],
+			highlightAnchors: new Map(),
+			askPinAnchors: [
+				{
+					id: "ask-1",
+					page: 1,
+					rects: [{ x: 0.1, y: 0.5, w: 0.4, h: 0.04 }],
+					translatedRects: [{ x: 0.2, y: 0.22, w: 0.3, h: 0.03 }],
+					preview: "why",
+					ended: false,
+				},
+			],
+			translates: [],
+			visualTraces: [],
+			pageTextMap: new Map(),
+			paperTitle: undefined,
+		});
+		const pin = index.pinsByPage.get(1)?.[0];
+		if (!pin) throw new Error("missing pin");
+		expect(pin.kind).toBe("ask");
+		expect(askHighlightRects(pin, false)).toEqual(pin.rects);
+		expect(askHighlightRects(pin, true)).toEqual(pin.translatedRects);
+		const shown = selectionPinForVisibleTranslation(pin, true);
+		expect(shown.y).toBe(0.22);
+		expect(shown.x).toBe(pin.x);
+		expect(selectionPinForVisibleTranslation(pin, false)).toBe(pin);
 	});
 
 	it("omits an uncommented crop until a note is saved", () => {

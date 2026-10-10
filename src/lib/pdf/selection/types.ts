@@ -37,4 +37,8 @@ export type SelectionPin = {
 	overText?: boolean;
 	/** Which side of the selection the pin prefers (affects transform). */
 	side?: "left" | "right";
+	/** English selection boxes. Ask pins use these for the persistent highlight. */
+	rects?: { x: number; y: number; w: number; h: number }[];
+	/** Translated selection boxes, painted while the page translation is showing. */
+	translatedRects?: { x: number; y: number; w: number; h: number }[];
 };

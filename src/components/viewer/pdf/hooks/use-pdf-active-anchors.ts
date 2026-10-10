@@ -32,6 +32,7 @@ export type PdfActiveAnchors = {
 		id: string;
 		page: number;
 		rects: PdfAskNormalizedRect[];
+		translatedRects?: PdfAskNormalizedRect[];
 	} | null;
 	activeTranslateAnchor: {
 		id: string;
@@ -68,12 +69,20 @@ export function usePdfActiveAnchors({
 	const activeAskId = activeThread?.id ?? null;
 	const activeAskPage = activeThread?.anchor.page ?? null;
 	const activeAskRects = activeThread?.anchor.rects ?? null;
+	const activeAskTranslated = activeThread?.anchor.translatedRects ?? null;
 	const activeAskAnchor = useMemo(
 		() =>
 			activeAskId !== null && activeAskPage !== null && activeAskRects !== null
-				? { id: activeAskId, page: activeAskPage, rects: activeAskRects }
+				? {
+						id: activeAskId,
+						page: activeAskPage,
+						rects: activeAskRects,
+						...(activeAskTranslated?.length
+							? { translatedRects: activeAskTranslated }
+							: {}),
+					}
 				: null,
-		[activeAskId, activeAskPage, activeAskRects],
+		[activeAskId, activeAskPage, activeAskRects, activeAskTranslated],
 	);
 	const activeTranslateId = activeTranslate?.id ?? null;
 	const activeTranslatePage = activeTranslate?.page ?? null;

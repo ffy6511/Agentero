@@ -6,6 +6,7 @@ import type {
 	PdfAskTrigger,
 	PdfAskVisualKind,
 } from "@/lib/pdf/ask/types";
+import { sanitizeTranslatedRects } from "@/lib/pdf/highlight/translated-geometry";
 import { isRecord, isRect } from "@/lib/pdf/marks/schema";
 import { pinFromRects } from "@/lib/pdf/selection/pin";
 
@@ -58,6 +59,9 @@ function parseAnchor(v: unknown): PdfAskAnchor | null {
 	};
 	if (typeof v.quote === "string") anchor.quote = v.quote;
 	if (isVisualKind(v.visualKind)) anchor.visualKind = v.visualKind;
+	// A missing or unusable list must not reject threads written before this field.
+	const translated = sanitizeTranslatedRects(v.translatedRects);
+	if (translated.length > 0) anchor.translatedRects = translated;
 	return anchor;
 }
 

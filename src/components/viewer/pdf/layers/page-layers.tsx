@@ -56,6 +56,7 @@ import {
 	pdfTileDpr,
 } from "@/components/viewer/pdf/constants";
 import { EMBED_PAGE_ATTR } from "@/components/viewer/pdf/coords";
+import { AskHighlightLayer } from "@/components/viewer/pdf/layers/ask-highlight-layer";
 import {
 	CitationLinkLayer,
 	linkAnnotationUri,
@@ -69,7 +70,11 @@ import { PdfTextSelectionLayer } from "@/components/viewer/pdf/layers/pdf-text-s
 import { PdfRegionSelectLayer } from "@/components/viewer/pdf/layers/region-select-layer";
 import { SelectionGutter } from "@/components/viewer/pdf/layers/selection-gutter";
 import { PDF_VISUAL_REGION_FRAME_CLASS } from "@/components/viewer/pdf/layers/visual-region-frame";
-import { commentForVisibleTranslation } from "@/components/viewer/pdf/marks-index";
+import {
+	askHighlightRects,
+	commentForVisibleTranslation,
+	selectionPinForVisibleTranslation,
+} from "@/components/viewer/pdf/marks-index";
 import type {
 	PageAnnotationComment,
 	ScreenPoint,
@@ -364,6 +369,8 @@ export type PdfActiveCardAnchor = {
 	/** 1-based page number */
 	page: number;
 	rects: PdfAskNormalizedRect[];
+	/** Translation-overlay boxes, when the open ask started on a translation. */
+	translatedRects?: PdfAskNormalizedRect[];
 };
 
 /** Marks and mark-derived overlays. Whole-document work, bucketed by page. */
@@ -712,6 +719,29 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 	const shownComments = translationVisible
 		? comments.map((comment) => commentForVisibleTranslation(comment, true))
 		: comments;
+	const shownPins = useMemo(
+		() =>
+			translationVisible
+				? pins.map((pin) => selectionPinForVisibleTranslation(pin, true))
+				: pins,
+		[pins, translationVisible],
+	);
+	const askHighlights = useMemo(() => {
+		const paints: { id: string; rects: readonly PdfAskNormalizedRect[] }[] = [];
+		const seen = new Set<string>();
+		for (const pin of pins) {
+			if (pin.kind !== "ask") continue;
+			const rects = askHighlightRects(pin, translationVisible);
+			if (!rects.length) continue;
+			seen.add(pin.id);
+			paints.push({ id: pin.id, rects });
+		}
+		if (activeAskOnPage && !seen.has(activeAskOnPage.id)) {
+			const rects = askHighlightRects(activeAskOnPage, translationVisible);
+			if (rects.length) paints.push({ id: activeAskOnPage.id, rects });
+		}
+		return paints;
+	}, [activeAskOnPage, pins, translationVisible]);
 	const pageTranslateState = layout.layoutTranslatePageStateByPage.get(
 		pageIndex,
 	) ?? { active: false, running: false };
@@ -1300,26 +1330,19 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 							);
 						})
 					: null}
-				{/* Open ask conversation card: highlight the anchored selection. */}
-				{activeAskOnPage
-					? activeAskOnPage.rects.map((rect) => (
-							<div
-								key={`${activeAskOnPage.id}-source-${rect.x}-${rect.y}-${rect.w}-${rect.h}`}
-								className={cn(
-									"pointer-events-auto absolute z-[1] rounded-[2px] bg-amber-300/45 dark:bg-amber-400/35",
-								)}
-								style={{
-									left: `${rect.x * 100}%`,
-									top: `${rect.y * 100}%`,
-									width: `${rect.w * 100}%`,
-									height: `${rect.h * 100}%`,
-								}}
-								aria-hidden="true"
-								onMouseEnter={handlers.onCardHoverEnter}
-								onMouseLeave={handlers.onCardHoverLeave}
-							/>
-						))
-					: null}
+				{/*
+				 * Quick-chat selections stay painted after the card closes, in the
+				 * same yellow as saved annotations. The open card still bridges
+				 * hover back to itself when the translation paper is not covering
+				 * the page.
+				 */}
+				<AskHighlightLayer
+					paints={askHighlights}
+					activeId={activeAskOnPage?.id ?? null}
+					bridgeHover={!translationVisible}
+					onHoverEnter={handlers.onCardHoverEnter}
+					onHoverLeave={handlers.onCardHoverLeave}
+				/>
 				{activeTranslateOnPage
 					? activeTranslateOnPage.rects.map((rect) => (
 							<div
@@ -1426,7 +1449,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					: null}
 				{!mode.plainViewer ? (
 					<SelectionGutter
-						items={pins}
+						items={shownPins}
 						activeId={marks.activeCardId}
 						onOpen={handlers.onOpenPin}
 						onEnter={handlers.onCardHoverEnter}
