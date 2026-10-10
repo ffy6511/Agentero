@@ -89,15 +89,24 @@ function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number) {
 	return Math.min(aEnd, bEnd) - Math.max(aStart, bStart) > 0;
 }
 
+/** Source heading size the overlay should keep while the box grows. */
+export type LayoutTranslateHeadingFit = {
+	pageWidthPx: number;
+	pageHeightPx: number;
+	fontSize: number;
+};
+
 /**
  * Conservative counterpart to BabelDOC's paragraph-box expansion. We never
- * cross a detected layout region and cap each direction at half the original
- * box, so a missed detection cannot turn one translated label into a page-wide
- * white slab.
+ * cross a detected layout region and cap each direction, so a missed detection
+ * cannot turn one translated label into a page-wide white slab. Headings may
+ * also grow downward (up to 2.75×) so a longer translation keeps the source
+ * glyph size instead of collapsing.
  */
 export function expandLayoutTranslateBbox(
 	item: LayoutTranslateItem,
 	blockers: readonly PdfLayoutRegion[] = [],
+	headingFit?: LayoutTranslateHeadingFit,
 ): LayoutTranslateItem["bbox"] {
 	const translated = item.translated?.trim();
 	const sourceWidth =
@@ -111,39 +120,80 @@ export function expandLayoutTranslateBbox(
 	const expandable =
 		(isLayoutTranslateHeadingKind(item.kind) || item.kind === "figure_title") &&
 		translatedWidth > sourceWidth * 1.1;
-	if (!expandable) return item.bbox;
 	const original = item.bbox;
-	const x2 = original.x + original.w;
+	let bbox = original;
+	if (expandable) {
+		const x2 = original.x + original.w;
+		const y2 = original.y + original.h;
+		let right = OVERLAY_PAGE_RIGHT;
+		let bottom = 1 - OVERLAY_GUTTER;
+		for (const blocker of blockers) {
+			if (blocker.id === item.id) continue;
+			const b = blocker.bbox;
+			if (
+				b.x >= x2 - OVERLAY_GUTTER &&
+				overlaps(original.y, y2, b.y, b.y + b.h)
+			) {
+				right = Math.min(right, b.x - OVERLAY_GUTTER);
+			}
+			if (
+				b.y >= y2 - OVERLAY_GUTTER &&
+				overlaps(original.x, x2, b.x, b.x + b.w)
+			) {
+				bottom = Math.min(bottom, b.y - OVERLAY_GUTTER);
+			}
+		}
+		const width = Math.max(
+			original.w,
+			Math.min(right - original.x, original.w * 1.5),
+		);
+		// Prefer one-direction expansion. Expanding both could cover a diagonal
+		// figure/table that does not overlap the original narrow title box.
+		bbox =
+			width > original.w + 0.001
+				? { ...original, w: width }
+				: {
+						...original,
+						h: Math.max(
+							original.h,
+							Math.min(bottom - original.y, original.h * 1.75),
+						),
+					};
+	}
+
+	if (
+		!headingFit ||
+		headingFit.pageHeightPx <= 0 ||
+		!isLayoutTranslateHeadingKind(item.kind) ||
+		!translated
+	) {
+		return bbox;
+	}
+	const widthPx = Math.max(1, bbox.w * headingFit.pageWidthPx - 4);
+	const lines = estimateLineCount(
+		translated,
+		widthPx,
+		headingFit.fontSize,
+		avgGlyphEm(translated),
+	);
+	const neededH =
+		(lines * headingFit.fontSize * LINE_HEIGHT + 3) / headingFit.pageHeightPx;
 	const y2 = original.y + original.h;
-	let right = OVERLAY_PAGE_RIGHT;
+	const x2 = bbox.x + bbox.w;
 	let bottom = 1 - OVERLAY_GUTTER;
 	for (const blocker of blockers) {
 		if (blocker.id === item.id) continue;
 		const b = blocker.bbox;
-		if (
-			b.x >= x2 - OVERLAY_GUTTER &&
-			overlaps(original.y, y2, b.y, b.y + b.h)
-		) {
-			right = Math.min(right, b.x - OVERLAY_GUTTER);
-		}
-		if (
-			b.y >= y2 - OVERLAY_GUTTER &&
-			overlaps(original.x, x2, b.x, b.x + b.w)
-		) {
+		if (b.y >= y2 - OVERLAY_GUTTER && overlaps(bbox.x, x2, b.x, b.x + b.w)) {
 			bottom = Math.min(bottom, b.y - OVERLAY_GUTTER);
 		}
 	}
-	const width = Math.max(
-		original.w,
-		Math.min(right - original.x, original.w * 1.5),
+	const cap = Math.min(
+		Math.max(bbox.h, bottom - original.y),
+		original.h * 2.75,
 	);
-	// Prefer one-direction expansion. Expanding both could cover a diagonal
-	// figure/table that does not overlap the original narrow title box.
-	if (width > original.w + 0.001) return { ...original, w: width };
-	return {
-		...original,
-		h: Math.max(original.h, Math.min(bottom - original.y, original.h * 1.75)),
-	};
+	const h = Math.min(Math.max(bbox.h, neededH), cap);
+	return h > bbox.h + 0.0001 ? { ...bbox, h } : bbox;
 }
 
 /** Wider glyphs for CJK; narrower for Latin (academic body). */
@@ -209,6 +259,15 @@ function fitFontSizeToBox(
 	return Math.max(FS_MIN, lo * FIT_SAFETY);
 }
 
+export type LayoutTranslateFontOptions = {
+	/**
+	 * Section and title blocks. Keep the size implied by the source box so a
+	 * longer translation does not flatten the heading into body text. The box
+	 * grows instead; body blocks still shrink to fit.
+	 */
+	heading?: boolean;
+};
+
 /**
  * Paper-like size from the English/source block, then adjust for the
  * translation so CN denser text does not leave a half-empty white slab.
@@ -219,6 +278,7 @@ export function fontSizeForLayoutTranslateBox(
 	pageHeightPx: number,
 	source: string,
 	translated?: string,
+	options?: LayoutTranslateFontOptions,
 ): number {
 	const padX = 4;
 	const padY = 3;
@@ -232,6 +292,17 @@ export function fontSizeForLayoutTranslateBox(
 
 	// 1) Size the original paper body would use in this bbox.
 	const paperFs = fitFontSizeToBox(src, w, h, srcEm);
+
+	if (options?.heading) {
+		let fs = paperFs;
+		const srcLines = estimateLineCount(src, w, Math.max(paperFs, 8), srcEm);
+		// A one-line title strip should fill its band. Do not cap that floor by
+		// the smaller size that would cram a longer translation into the same box.
+		if (srcLines === 1 && src.length < 140 && h < 56) {
+			fs = Math.max(fs, Math.min(FS_MAX, (h / LINE_HEIGHT) * 0.92));
+		}
+		return Math.max(FS_MIN, Math.min(FS_MAX, fs));
+	}
 
 	// 2) Largest size that still fits the translation in the same box.
 	const fitFs = fitFontSizeToBox(display, w, h, dispEm);
@@ -318,6 +389,7 @@ function fontSizeForLayoutTranslateItem(
 		pageHeightPx,
 		item.source,
 		text,
+		{ heading: isLayoutTranslateHeadingKind(item.kind) },
 	);
 	if (byText.size >= FONT_SIZE_CACHE_MAX_TEXTS) byText.clear();
 	byText.set(text, fontSize);
@@ -495,9 +567,14 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 			lineHeight = candidate;
 		}
 
-		let lo = DOM_FIT_ABSOLUTE_MIN;
+		// Headings stay near the source size. The box grows to fit; this pass must
+		// not binary-search a title down to 1px the way a body block may.
+		const floor = isHeading
+			? Math.max(DOM_FIT_ABSOLUTE_MIN, initialFontSize * 0.9)
+			: DOM_FIT_ABSOLUTE_MIN;
+		let lo = floor;
 		let hi = initialFontSize;
-		let best = DOM_FIT_ABSOLUTE_MIN;
+		let best = floor;
 		applyParagraphMetrics(element, lo, lineHeight);
 
 		// An unbreakable URL / identifier can exceed the box at every readable
@@ -527,10 +604,10 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 		}
 		applyParagraphMetrics(
 			element,
-			Math.max(DOM_FIT_ABSOLUTE_MIN, best * FIT_SAFETY),
+			Math.max(floor, best * FIT_SAFETY),
 			lineHeight,
 		);
-	}, [boxHeightPx, boxWidthPx, initialFontSize, text]);
+	}, [boxHeightPx, boxWidthPx, initialFontSize, isHeading, text]);
 
 	return (
 		<p
@@ -612,11 +689,33 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 }: LayoutTranslateOverlayProps) {
 	const onPage = useMemo(
 		() =>
-			items.filter(isLayoutTranslateItemPainted).map((item) => ({
-				...item,
-				bbox: expandLayoutTranslateBbox(item, layoutRegions),
-			})),
-		[items, layoutRegions],
+			items.filter(isLayoutTranslateItemPainted).map((item) => {
+				const paintText =
+					item.status === "running"
+						? (item.translated ?? "…")
+						: (item.translated ?? "");
+				// Size from the source box. Expansion below must not inflate a
+				// heading just because the translation borrowed extra height.
+				const paintFontSize = fontSizeForLayoutTranslateItem(
+					item,
+					pageWidthPx,
+					pageHeightPx,
+					paintText,
+				);
+				return {
+					...item,
+					bbox: expandLayoutTranslateBbox(
+						item,
+						layoutRegions,
+						isLayoutTranslateHeadingKind(item.kind)
+							? { pageWidthPx, pageHeightPx, fontSize: paintFontSize }
+							: undefined,
+					),
+					paintText,
+					paintFontSize,
+				};
+			}),
+		[items, layoutRegions, pageHeightPx, pageWidthPx],
 	);
 	const tintByItem = useMemo(() => {
 		const map = new Map<string, ReadonlyMap<number, HighlightColor>>();
@@ -647,21 +746,13 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 	return (
 		<>
 			{onPage.map((item) => {
-				const text =
-					item.status === "running"
-						? (item.translated ?? "…")
-						: (item.translated ?? "");
+				const text = item.paintText;
 				const isHeading = isLayoutTranslateHeadingKind(item.kind);
 				const linkAssignments = assignPreservedLinks(
 					text,
 					linksByItem.get(item.id) ?? [],
 				);
-				const fontSize = fontSizeForLayoutTranslateItem(
-					item,
-					pageWidthPx,
-					pageHeightPx,
-					text,
-				);
+				const fontSize = item.paintFontSize;
 				const boxWidthPx = item.bbox.w * pageWidthPx;
 				const boxHeightPx = item.bbox.h * pageHeightPx;
 				const boxStyle = {

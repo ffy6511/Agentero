@@ -282,6 +282,23 @@ describe("fontSizeForLayoutTranslateBox", () => {
 		expect(withZh).toBeGreaterThanOrEqual(paperLike * 0.95);
 		expect(withZh).toBeLessThanOrEqual(paperLike * 1.25 + 0.5);
 	});
+
+	it("keeps a longer heading at the source size instead of shrinking to fit", () => {
+		const bbox = { x: 0.1, y: 0.08, w: 0.7, h: 0.035 };
+		const pageW = 800;
+		const pageH = 1100;
+		const en = "Introduction";
+		const zh = "这是一个明显更长的章节标题用来验证字号不会被压扁";
+		const english = fontSizeForLayoutTranslateBox(bbox, pageW, pageH, en, en, {
+			heading: true,
+		});
+		const chinese = fontSizeForLayoutTranslateBox(bbox, pageW, pageH, en, zh, {
+			heading: true,
+		});
+		const shrunk = fontSizeForLayoutTranslateBox(bbox, pageW, pageH, en, zh);
+		expect(Math.abs(chinese - english) / english).toBeLessThanOrEqual(0.02);
+		expect(chinese).toBeGreaterThan(shrunk);
+	});
 });
 
 describe("expandLayoutTranslateBbox", () => {
@@ -314,6 +331,33 @@ describe("expandLayoutTranslateBbox", () => {
 	it("does not expand a long body paragraph into adjacent content", () => {
 		const body = { ...item("text"), source: "word ".repeat(100) };
 		expect(expandLayoutTranslateBbox(body)).toEqual(body.bbox);
+	});
+
+	it("grows a heading down to the source font size and stops at a blocker", () => {
+		const heading = item("header");
+		const fontSize = fontSizeForLayoutTranslateBox(
+			heading.bbox,
+			800,
+			1100,
+			heading.source,
+			heading.translated,
+			{ heading: true },
+		);
+		const expanded = expandLayoutTranslateBbox(
+			heading,
+			[
+				region({
+					id: "body",
+					kind: "text",
+					pageIndex: 0,
+					bbox: { x: 0.1, y: 0.2, w: 0.7, h: 0.2 },
+				}),
+			],
+			{ pageWidthPx: 800, pageHeightPx: 1100, fontSize },
+		);
+		expect(expanded.h).toBeGreaterThan(heading.bbox.h);
+		expect(expanded.y + expanded.h).toBeLessThanOrEqual(0.2 - 0.006 + 1e-9);
+		expect(expanded.h).toBeLessThanOrEqual(heading.bbox.h * 2.75 + 1e-9);
 	});
 });
 
