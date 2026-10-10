@@ -24,6 +24,16 @@ describe("findPreservedLinkSpans", () => {
 		]);
 	});
 
+	it("keeps spaced PDF cites and translated author-year forms", () => {
+		const text =
+			"See ( Jimenez et al. , 2024 ; Merrill et al. , 2026 ) and （Jimenez et al.，2024 ;梅里尔et al.，2026） and （Pan等人，2024 ; Jain等人，2025）.";
+		expect(findPreservedLinkSpans(text).map((span) => span.text)).toEqual([
+			"( Jimenez et al. , 2024 ; Merrill et al. , 2026 )",
+			"（Jimenez et al.，2024 ;梅里尔et al.，2026）",
+			"（Pan等人，2024 ; Jain等人，2025）",
+		]);
+	});
+
 	it("does not treat batch markers as citations", () => {
 		const spans = findPreservedLinkSpans("[[1]] first [2] [[3]]");
 		expect(spans.map((span) => span.text)).toEqual(["[2]"]);

@@ -21,10 +21,14 @@ const CITATION_LINK =
 	/[[［][0-9]+[a-z]?(?:\s*[-–—~,，]\s*[0-9]+[a-z]?)*[\]］]/gi;
 const REF_LINK =
 	/\b(?:Figures?|Figs?\.|Tables?|Tabs?\.|Sections?|Secs?\.|Equations?|Eqs?\.|Eqn?\.|Algorithms?|Algs?\.|Theorems?|Lemmas?|Appendices|Appendix)\s+\(?\d+(?:\.\d+)?[a-z]?(?:\s*[-–—]\s*\(?\d+(?:\.\d+)?[a-z]?)?\)?/gi;
+const AUTHOR_NAME = "(?:[A-Z][A-Za-z'’-]{1,40}|[\\u4e00-\\u9fff]{1,12})";
+// PDF text often pads the parenthesis and the comma. Machine translation
+// then rewrites them to fullwidth brackets, a Chinese comma, and 等人.
 const AUTHOR_TAIL =
-	"(?:\\s+et\\s+al\\.?|\\s+(?:and|&)\\s+[A-Z][A-Za-z'’-]{1,40})?";
+	"(?:\\s*et\\s+al\\.?|\\s*(?:and|&)\\s+[A-Z][A-Za-z'’-]{1,40}|等人|等)?";
+const AUTHOR_CITE = `${AUTHOR_NAME}${AUTHOR_TAIL}\\s*[,，]\\s*\\d{4}[a-z]?(?:\\s*年)?`;
 const AUTHOR_YEAR = new RegExp(
-	`\\([A-Z][A-Za-z'’-]{1,40}${AUTHOR_TAIL},\\s*\\d{4}[a-z]?(?:\\s*;\\s*[A-Z][A-Za-z'’-]{1,40}${AUTHOR_TAIL},\\s*\\d{4}[a-z]?)*\\)`,
+	`[(（]\\s*${AUTHOR_CITE}(?:\\s*[;；]\\s*${AUTHOR_CITE})*\\s*[)）]`,
 	"g",
 );
 
