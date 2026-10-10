@@ -175,28 +175,16 @@ export function usePdfAskThreads({
 		[setThreads],
 	);
 
-	/** A card closed without a question was never a thread — drop the draft. */
-	const discardIfEmptyDraft = useCallback(
-		(threadId: string | null) => {
-			if (!threadId) return;
-			const th = threadsRef.current.find((t) => t.id === threadId);
-			if (!th || threadHasUserQuestion(th)) return;
-			setThreads((prev) => prev.filter((t) => t.id !== threadId));
-		},
-		[setThreads, threadsRef],
-	);
-
 	const clearAskError = useCallback(() => {
 		setAskError(null);
 	}, []);
 
-	const closeAskChrome = useCallback(
-		(threadId: string) => {
-			discardIfEmptyDraft(threadId);
-			setAskError(null);
-		},
-		[discardIfEmptyDraft],
-	);
+	const closeAskChrome = useCallback((_threadId: string) => {
+		// Keep empty drafts after the card closes so the selection range
+		// stays painted like an annotation (#732). createThreadFromAnchor
+		// still drops prior empties when the next Ask starts.
+		setAskError(null);
+	}, []);
 
 	const openThread = useCallback(
 		(thread: PdfAskThread) => openCard({ kind: "ask", id: thread.id }),

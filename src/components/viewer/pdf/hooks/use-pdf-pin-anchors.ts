@@ -55,16 +55,18 @@ export function usePdfPinAnchors({
 	 */
 	const askPinAnchors = useStableDerived<AskPinAnchor[]>(
 		() =>
-			threads.filter(threadHasUserQuestion).map((th) => ({
-				id: th.id,
-				page: th.anchor.page,
-				rects: th.anchor.rects,
-				...(th.anchor.translatedRects?.length
-					? { translatedRects: th.anchor.translatedRects }
-					: {}),
-				preview: threadPreview(th),
-				ended: th.status === "ended",
-			})),
+			threads
+				.filter((th) => (th.anchor.rects?.length ?? 0) > 0)
+				.map((th) => ({
+					id: th.id,
+					page: th.anchor.page,
+					rects: th.anchor.rects,
+					...(th.anchor.translatedRects?.length
+						? { translatedRects: th.anchor.translatedRects }
+						: {}),
+					preview: threadPreview(th),
+					ended: th.status === "ended",
+				})),
 		threads
 			.map(
 				(th) =>
