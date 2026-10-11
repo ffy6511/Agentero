@@ -23,6 +23,8 @@ export type TranslateLinkBox = {
 	kind: "goto" | "url";
 	box: NormBox;
 	url?: string;
+	/** Raw PDF fill `#rrggbb`. Omitted when the link has no chromatic ink. */
+	color?: string;
 };
 
 export type PreservedLinkAssignment = {
@@ -32,6 +34,8 @@ export type PreservedLinkAssignment = {
 	/** PDF annotation id, when this span drives an in-document link. */
 	key: string | null;
 	url?: string;
+	/** Raw PDF fill `#rrggbb`, before paper-tone adjustment. */
+	color?: string;
 };
 
 type LinkHost = {
@@ -55,6 +59,35 @@ function byReading(a: TranslateLinkBox, b: TranslateLinkBox): number {
 	return a.box.y - b.box.y || a.box.x - b.box.x;
 }
 
+/** Same hit rectangle. EmbedPDF can list one PDF link many times. */
+function sameRect(a: NormBox, b: NormBox): boolean {
+	const close = (left: number, right: number) =>
+		Math.abs(left - right) < 0.0005;
+	return (
+		close(a.x, b.x) && close(a.y, b.y) && close(a.w, b.w) && close(a.h, b.h)
+	);
+}
+
+/**
+ * One entry per rectangle. Repeated copies of the same link sit on top of
+ * each other and would break the gap test that separates `[17,38]`.
+ */
+function dedupeTranslateLinks(
+	links: readonly TranslateLinkBox[],
+): TranslateLinkBox[] {
+	const kept: TranslateLinkBox[] = [];
+	for (const link of links) {
+		const duplicate = kept.some(
+			(prev) =>
+				prev.kind === link.kind &&
+				(prev.url ?? "") === (link.url ?? "") &&
+				sameRect(prev.box, link.box),
+		);
+		if (!duplicate) kept.push(link);
+	}
+	return kept;
+}
+
 /**
  * Give each link to the translated block that contains its center, else the
  * block with the largest overlap. Each link is claimed once.
@@ -68,7 +101,7 @@ export function claimTranslateLinks<T extends LinkHost>(
 	);
 	const map = new Map<string, TranslateLinkBox[]>();
 	for (const item of ordered) map.set(item.id, []);
-	for (const link of links) {
+	for (const link of dedupeTranslateLinks(links)) {
 		const cx = link.box.x + link.box.w / 2;
 		const cy = link.box.y + link.box.h / 2;
 		let host = ordered.find((item) => contains(item.bbox, cx, cy));
@@ -94,17 +127,125 @@ function urlsMatch(a: string, b: string): boolean {
 	return trim(a) === trim(b);
 }
 
+function withLinkColor(
+	assignment: PreservedLinkAssignment,
+	link: TranslateLinkBox | undefined,
+): PreservedLinkAssignment {
+	if (!link?.color) return assignment;
+	return { ...assignment, color: link.color };
+}
+
+type TextPiece = { start: number; end: number; text: string };
+
+/**
+ * About 18 pt on an A4 page. Wider than a comma or hyphen inside `[17, 38]`,
+ * narrower than the words that separate two citation groups.
+ */
+const CLUSTER_GAP = 0.03;
+
+function numberPieces(span: PreservedLinkSpan): TextPiece[] {
+	const pieces: TextPiece[] = [];
+	for (const match of span.text.matchAll(/[0-9]+(?:\.[0-9]+)?[a-z]?/gi)) {
+		const rel = match.index ?? 0;
+		const text = match[0];
+		pieces.push({
+			start: span.start + rel,
+			end: span.start + rel + text.length,
+			text,
+		});
+	}
+	return pieces;
+}
+
+function semicolonPieces(span: PreservedLinkSpan): TextPiece[] {
+	const pieces: TextPiece[] = [];
+	for (const match of span.text.matchAll(/[^;；]+/g)) {
+		const raw = match[0];
+		const rel = match.index ?? 0;
+		let start = span.start + rel;
+		let end = start + raw.length;
+		let text = raw;
+		const lead = text.match(/^[(（\s]+/);
+		if (lead?.[0]) {
+			start += lead[0].length;
+			text = text.slice(lead[0].length);
+		}
+		const trail = text.match(/[\s)）]+$/);
+		if (trail?.[0]) {
+			end -= trail[0].length;
+			text = text.slice(0, text.length - trail[0].length);
+		}
+		if (!text) continue;
+		pieces.push({ start, end, text });
+	}
+	return pieces;
+}
+
+/**
+ * A preserved token can hide several PDF links (`[17,38]`, `Fig. 1-2`,
+ * two author-year cites). Each atom is a separate hit target.
+ */
+function splittablePieces(span: PreservedLinkSpan): TextPiece[] | null {
+	if (span.kind === "citation" && /^[[［]/.test(span.text)) {
+		const pieces = numberPieces(span);
+		return pieces.length >= 2 ? pieces : null;
+	}
+	if (span.kind === "citation" && /[;；]/.test(span.text)) {
+		const pieces = semicolonPieces(span);
+		return pieces.length >= 2 ? pieces : null;
+	}
+	if (span.kind === "ref") {
+		const pieces = numberPieces(span);
+		return pieces.length >= 2 ? pieces : null;
+	}
+	return null;
+}
+
+function sameLinkCluster(a: TranslateLinkBox, b: TranslateLinkBox): boolean {
+	const line = Math.max(a.box.h, b.box.h, 0.004);
+	const dy = Math.abs(a.box.y + a.box.h / 2 - (b.box.y + b.box.h / 2));
+	if (dy > Math.max(line * 0.9, 0.008)) return false;
+	const gap = b.box.x - (a.box.x + a.box.w);
+	return gap >= -0.008 && gap <= CLUSTER_GAP;
+}
+
+function adjacentGotos(
+	gotos: readonly TranslateLinkBox[],
+	start: number,
+	limit: number,
+	used: Set<string>,
+): TranslateLinkBox[] {
+	const first = gotos[start];
+	if (!first || used.has(first.key) || limit < 2) return [];
+	const group = [first];
+	for (
+		let index = start + 1;
+		index < gotos.length && group.length < limit;
+		index++
+	) {
+		const next = gotos[index];
+		const prev = group[group.length - 1];
+		if (!next || !prev || used.has(next.key) || !sameLinkCluster(prev, next)) {
+			break;
+		}
+		group.push(next);
+	}
+	return group;
+}
+
 /**
  * Pair preserved tokens in `text` with `links` already claimed by this block.
  * URL tokens match by URL. Citation and ref tokens take the remaining GoTo
- * links in reading order.
+ * links in reading order. A bracket group with several numbers takes one
+ * adjacent link per number, so `[17,38]` stays two targets.
  */
 export function assignPreservedLinks(
 	text: string,
 	links: readonly TranslateLinkBox[],
 ): PreservedLinkAssignment[] {
+	const unique = dedupeTranslateLinks(links);
 	const spans = findPreservedLinkSpans(text);
-	if (!spans.length || !links.length) {
+	if (!spans.length || !unique.length) {
 		return spans
 			.filter((span) => span.url)
 			.map((span) => ({
@@ -116,11 +257,37 @@ export function assignPreservedLinks(
 			}));
 	}
 	const used = new Set<string>();
-	const gotos = links.filter((link) => link.kind === "goto");
+	const gotos = unique.filter((link) => link.kind === "goto");
 	let gotoIndex = 0;
 	const assigned: PreservedLinkAssignment[] = [];
 	for (const span of spans) {
-		const hit = matchSpan(span, links, gotos, used, gotoIndex);
+		const pieces = splittablePieces(span);
+		if (pieces) {
+			const group = adjacentGotos(gotos, gotoIndex, pieces.length, used);
+			if (group.length >= 2) {
+				const count = Math.min(group.length, pieces.length);
+				for (let index = 0; index < count; index++) {
+					const piece = pieces[index];
+					const goto = group[index];
+					if (!piece || !goto) continue;
+					used.add(goto.key);
+					assigned.push(
+						withLinkColor(
+							{
+								start: piece.start,
+								end: piece.end,
+								text: piece.text,
+								key: goto.key,
+							},
+							goto,
+						),
+					);
+				}
+				gotoIndex += count;
+				continue;
+			}
+		}
+		const hit = matchSpan(span, unique, gotos, used, gotoIndex);
 		if (hit.gotoIndex !== gotoIndex) gotoIndex = hit.gotoIndex;
 		if (!hit.assignment) continue;
 		assigned.push(hit.assignment);
@@ -147,13 +314,16 @@ function matchSpan(
 			used.add(byUrl.key);
 			return {
 				gotoIndex,
-				assignment: {
-					start: span.start,
-					end: span.end,
-					text: span.text,
-					key: byUrl.key,
-					url: byUrl.url,
-				},
+				assignment: withLinkColor(
+					{
+						start: span.start,
+						end: span.end,
+						text: span.text,
+						key: byUrl.key,
+						url: byUrl.url,
+					},
+					byUrl,
+				),
 			};
 		}
 		return {
@@ -174,12 +344,15 @@ function matchSpan(
 	used.add(goto.key);
 	return {
 		gotoIndex: gotoIndex + 1,
-		assignment: {
-			start: span.start,
-			end: span.end,
-			text: span.text,
-			key: goto.key,
-		},
+		assignment: withLinkColor(
+			{
+				start: span.start,
+				end: span.end,
+				text: span.text,
+				key: goto.key,
+			},
+			goto,
+		),
 	};
 }
 

@@ -104,6 +104,7 @@ import {
 	type PdfLayoutRegion,
 	type PointerOrigin,
 } from "@/lib/pdf/layout";
+import { translatedTextLinkKey } from "@/lib/pdf/layout/link-ink";
 import type {
 	PreservedLinkAssignment,
 	TranslateLinkBox,
@@ -449,6 +450,11 @@ export type PdfPageLayoutSlice = {
 		string,
 		readonly (readonly PdfAskNormalizedRect[])[]
 	>;
+	/**
+	 * Raw PDF fill per translated-link key (`link.id`, or the text-link key).
+	 * Absent until that page's text runs have been read.
+	 */
+	linkInkByKey?: ReadonlyMap<string, string>;
 };
 
 /** Interaction modes that unmount or gate page layers. */
@@ -940,6 +946,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 		const pageHeightPt = height / zoom;
 		if (pageWidthPt <= 0 || pageHeightPt <= 0) return [] as TranslateLinkBox[];
 		const boxes: TranslateLinkBox[] = [];
+		const ink = layout.linkInkByKey;
 		const norm = (rect: {
 			origin: { x: number; y: number };
 			size: { width: number; height: number };
@@ -949,25 +956,48 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 			w: rect.size.width / pageWidthPt,
 			h: rect.size.height / pageHeightPt,
 		});
+		const withInk = (box: TranslateLinkBox, key: string): TranslateLinkBox => {
+			const color = ink?.get(key);
+			return color ? { ...box, color } : box;
+		};
 		for (const link of marks.citationLinks.get(pageIndex) ?? []) {
 			const url = linkAnnotationUri(link);
-			boxes.push({
-				key: link.id,
-				kind: url ? "url" : "goto",
-				url: url ?? undefined,
-				box: norm(link.rect),
-			});
+			boxes.push(
+				withInk(
+					{
+						key: link.id,
+						kind: url ? "url" : "goto",
+						url: url ?? undefined,
+						box: norm(link.rect),
+					},
+					link.id,
+				),
+			);
 		}
 		for (const link of marks.textLinks.get(pageIndex) ?? []) {
-			boxes.push({
-				key: `text:${link.url}:${link.rect.origin.x}:${link.rect.origin.y}`,
-				kind: "url",
-				url: link.url,
-				box: norm(link.rect),
-			});
+			const key = translatedTextLinkKey(link);
+			boxes.push(
+				withInk(
+					{
+						key,
+						kind: "url",
+						url: link.url,
+						box: norm(link.rect),
+					},
+					key,
+				),
+			);
 		}
 		return boxes;
-	}, [height, marks.citationLinks, marks.textLinks, pageIndex, width, zoomRef]);
+	}, [
+		height,
+		layout.linkInkByKey,
+		marks.citationLinks,
+		marks.textLinks,
+		pageIndex,
+		width,
+		zoomRef,
+	]);
 	const citationById = useMemo(() => {
 		const map = new Map<string, PdfLinkAnnoObject>();
 		for (const link of marks.citationLinks.get(pageIndex) ?? []) {

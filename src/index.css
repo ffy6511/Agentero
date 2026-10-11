@@ -530,6 +530,20 @@
 }
 
 /*
+ * Preserved tokens ([12], 图 3, URLs) use the original glyph fill (inline
+ * style). Inherit until that fill arrives so the token does not flash the
+ * browser's link blue. No underline: colorlinks PDFs already mark the link
+ * by ink color, and a zero-width border paints nothing on the source page.
+ */
+.pdf-translate-selection a[data-translated-link],
+.pdf-translate-selection a[data-translated-link]:visited,
+.pdf-translate-selection a[data-translated-link]:hover {
+	color: inherit;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+/*
  * PDF bottom-bar zoom slider: muted gray at rest, brand accent on hover /
  * focus / drag so the control stays quiet until the pointer engages it.
  * Use --brand (chromatic) rather than --primary (near black/white neutrals).

@@ -72,6 +72,7 @@ import { usePdfFind } from "@/components/viewer/pdf/hooks/use-pdf-find";
 import { usePdfHighlights } from "@/components/viewer/pdf/hooks/use-pdf-highlights";
 import { usePdfJumpBack } from "@/components/viewer/pdf/hooks/use-pdf-jump-back";
 import { usePdfLayoutCluster } from "@/components/viewer/pdf/hooks/use-pdf-layout-cluster";
+import { usePdfLinkInk } from "@/components/viewer/pdf/hooks/use-pdf-link-ink";
 import { usePdfLinkUrlTip } from "@/components/viewer/pdf/hooks/use-pdf-link-url-tip";
 import { usePdfMarkActions } from "@/components/viewer/pdf/hooks/use-pdf-mark-actions";
 import { usePdfMarksIo } from "@/components/viewer/pdf/hooks/use-pdf-marks-io";
@@ -1659,6 +1660,14 @@ function PdfViewerInner({
 		itemsByPage: layoutTranslateItemsByPage,
 		highlightQuotesByPage,
 	});
+	const linkInkByKey = usePdfLinkInk({
+		engine,
+		docCapRef,
+		docId,
+		itemsByPage: layoutTranslateItemsByPage,
+		citationLinks,
+		textLinks,
+	});
 
 	const pageMarks = useMemo<PdfPageMarksSlice>(
 		() => ({
@@ -1720,6 +1729,7 @@ function PdfViewerInner({
 					? layoutTranslatePageStateByPage
 					: new Map(),
 			sentenceRectsByItemId,
+			linkInkByKey,
 		}),
 		[
 			hoverableRegionsByPage,
@@ -1730,6 +1740,7 @@ function PdfViewerInner({
 			translationPane,
 			dualPaneTranslate,
 			sentenceRectsByItemId,
+			linkInkByKey,
 		],
 	);
 

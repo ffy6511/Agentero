@@ -17,6 +17,7 @@ import { isLayoutTranslateHeadingKind } from "@/lib/pdf/layout/labels";
 import { layoutTranslateSentenceNodes } from "@/lib/pdf/layout/layout-sentences";
 import type { LayoutTranslateItem } from "@/lib/pdf/layout/layout-translate";
 import { isLayoutTranslateItemPainted } from "@/lib/pdf/layout/layout-translate-reliable";
+import { linkColorOnPaper } from "@/lib/pdf/layout/link-ink";
 import {
 	assignmentsWithin,
 	assignPreservedLinks,
@@ -471,6 +472,7 @@ type ExactFitParagraphProps = {
 	isHeading: boolean;
 	/** Dark PDF paper: selection ink stays light, matching the glyphs. */
 	paperDark: boolean;
+	tone: PdfPaperTone;
 	/** Sentence indexes whose translation should show the highlight color. */
 	tintedSentences?: ReadonlyMap<number, HighlightColor>;
 	linkAssignments?: readonly PreservedLinkAssignment[];
@@ -496,6 +498,14 @@ function sentenceSlices(
 	return slices;
 }
 
+function linkInkStyle(
+	color: string | undefined,
+	tone: PdfPaperTone,
+): { color: string } | undefined {
+	if (!color) return undefined;
+	return { color: linkColorOnPaper(color, tone) };
+}
+
 function linkPoint(element: HTMLElement) {
 	const box = element.getBoundingClientRect();
 	return {
@@ -508,16 +518,20 @@ function linkPoint(element: HTMLElement) {
 
 /**
  * Render `text`, wrapping preserved link tokens. A drag that produced a
- * selection does not navigate.
+ * selection does not navigate. Each token uses the original glyph fill
+ * (`assignment.color`), adjusted for the paper tone. The source page marks
+ * these links by ink color, so the token does not add an underline.
  */
 function LinkifiedText({
 	text,
 	assignments,
+	tone,
 	onOpenLink,
 	onHoverLink,
 }: {
 	text: string;
 	assignments: readonly PreservedLinkAssignment[] | undefined;
+	tone: PdfPaperTone;
 	onOpenLink?: (assignment: PreservedLinkAssignment) => void;
 	onHoverLink?: LayoutTranslateOverlayProps["onHoverLink"];
 }) {
@@ -556,7 +570,7 @@ function LinkifiedText({
 				key={part.key}
 				href={part.assignment.url ?? "#"}
 				data-translated-link={part.assignment.key ?? part.assignment.url ?? ""}
-				className="cursor-pointer text-inherit underline decoration-current/60 underline-offset-2"
+				style={linkInkStyle(part.assignment.color, tone)}
 				onClick={(event) => {
 					event.preventDefault();
 					event.stopPropagation();
@@ -590,6 +604,7 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 	boxHeightPx,
 	isHeading,
 	paperDark,
+	tone,
 	tintedSentences,
 	linkAssignments,
 	onOpenLink,
@@ -703,6 +718,7 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 									node.start,
 									node.start + node.text.length,
 								)}
+								tone={tone}
 								onOpenLink={onOpenLink}
 								onHoverLink={onHoverLink}
 							/>
@@ -713,6 +729,7 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 				<LinkifiedText
 					text={text}
 					assignments={linkAssignments}
+					tone={tone}
 					onOpenLink={onOpenLink}
 					onHoverLink={onHoverLink}
 				/>
@@ -891,6 +908,7 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 									boxHeightPx={boxHeightPx}
 									isHeading={isHeading}
 									paperDark={tone === "dark"}
+									tone={tone}
 									tintedSentences={tintByItem.get(item.id)}
 									linkAssignments={linkAssignments}
 									onOpenLink={onOpenLink}

@@ -110,6 +110,73 @@ describe("assignPreservedLinks", () => {
 		]);
 	});
 
+	it("splits a bracket group into one target per adjacent link", () => {
+		const near = (key: string, x: number): TranslateLinkBox => ({
+			key,
+			kind: "goto",
+			box: { x, y: 0.51, w: 0.022, h: 0.011 },
+			color: key === "n38" ? "#ed028c" : "#00a3e3",
+		});
+		const text = "环境 [17,38]。随后 [46]。";
+		const assigned = assignPreservedLinks(text, [
+			near("n17", 0.39),
+			near("n38", 0.418),
+			near("n46", 0.7),
+		]);
+		expect(assigned.map((item) => [item.text, item.key, item.color])).toEqual([
+			["17", "n17", "#00a3e3"],
+			["38", "n38", "#ed028c"],
+			["[46]", "n46", "#00a3e3"],
+		]);
+	});
+
+	it("splits a bracket group when the same rect is listed many times", () => {
+		const camel: TranslateLinkBox = {
+			key: "n17",
+			kind: "goto",
+			box: { x: 0.389715, y: 0.51265, w: 0.021958, h: 0.010851 },
+			color: "#00a3e3",
+		};
+		const autogen: TranslateLinkBox = {
+			key: "n38",
+			kind: "goto",
+			box: { x: 0.418171, y: 0.51265, w: 0.021958, h: 0.010644 },
+			color: "#00a3e3",
+		};
+		const text = "工具交互[17,38]。";
+		const assigned = assignPreservedLinks(text, [
+			camel,
+			{ ...camel, key: "n17-dup" },
+			{ ...camel, key: "n17-dup-2" },
+			autogen,
+			{ ...autogen, key: "n38-dup" },
+		]);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["17", "n17"],
+			["38", "n38"],
+		]);
+	});
+
+	it("keeps one bracket group when the next link is not beside it", () => {
+		const text = "见 [17,38]，另见 [46]。";
+		const assigned = assignPreservedLinks(text, [
+			{
+				key: "only",
+				kind: "goto",
+				box: { x: 0.39, y: 0.51, w: 0.022, h: 0.011 },
+			},
+			{
+				key: "later",
+				kind: "goto",
+				box: { x: 0.7, y: 0.51, w: 0.022, h: 0.011 },
+			},
+		]);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[17,38]", "only"],
+			["[46]", "later"],
+		]);
+	});
+
 	it("opens a markdown link from its own url", () => {
 		const text = "Read [paper](https://example.com/p).";
 		const link = "[paper](https://example.com/p)";
