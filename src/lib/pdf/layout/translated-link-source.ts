@@ -4,13 +4,18 @@
  * plugin, so it cannot rebuild the map itself.
  */
 
-import type { PdfLinkAnnoObject } from "@embedpdf/models";
-import type { PdfTextLink } from "@/components/viewer/pdf/layers/citation-links";
+import type { PdfLinkAnnoObject, Rect } from "@embedpdf/models";
 import { layoutDocumentKey } from "@/lib/pdf/layout/store";
+
+/** Bare URL hit box. Same shape as the viewer's text-link rect. */
+export type TranslatedTextLink = {
+	url: string;
+	rect: Rect;
+};
 
 export type TranslatedLinkSource = {
 	citationLinks: ReadonlyMap<number, PdfLinkAnnoObject[]>;
-	textLinks: ReadonlyMap<number, PdfTextLink[]>;
+	textLinks: ReadonlyMap<number, TranslatedTextLink[]>;
 };
 
 const EMPTY_PAGE_MAP = new Map();
