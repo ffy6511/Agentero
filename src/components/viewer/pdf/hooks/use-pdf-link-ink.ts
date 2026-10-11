@@ -14,6 +14,7 @@ import {
 	type LinkInkTarget,
 	translatedTextLinkKey,
 } from "@/lib/pdf/layout/link-ink";
+import type { GlyphRun } from "@/lib/pdf/layout/translated-links";
 import type { LayoutTranslateItem } from "@/lib/pdf/layout/types";
 
 type DocumentManagerCapability = ReturnType<
@@ -68,11 +69,52 @@ function targetsOnPage(
 	return targets;
 }
 
+type CachedPage = {
+	inkRuns: InkRun[];
+	glyphs: GlyphRun[];
+};
+
+export type PdfLinkInkResult = {
+	inkByKey: ReadonlyMap<string, string>;
+	runsByPage: ReadonlyMap<number, readonly GlyphRun[]>;
+};
+
+const EMPTY_RESULT: PdfLinkInkResult = {
+	inkByKey: new Map(),
+	runsByPage: new Map(),
+};
+
 function inkSignature(ink: ReadonlyMap<string, string>): string {
 	const parts: string[] = [];
 	for (const [key, color] of ink) parts.push(`${key}=${color}`);
 	parts.sort();
 	return parts.join("\n");
+}
+
+function glyphRunsFrom(
+	runs: readonly { text?: string; rect: InkRun["rect"] }[],
+	pageWidth: number,
+	pageHeight: number,
+): GlyphRun[] {
+	if (!(pageWidth > 0) || !(pageHeight > 0)) return [];
+	const glyphs: GlyphRun[] = [];
+	for (const run of runs) {
+		const text = run.text ?? "";
+		if (!text) continue;
+		const w = run.rect.size.width / pageWidth;
+		const h = run.rect.size.height / pageHeight;
+		if (!(w > 0) || !(h > 0)) continue;
+		glyphs.push({
+			text,
+			box: {
+				x: run.rect.origin.x / pageWidth,
+				y: run.rect.origin.y / pageHeight,
+				w,
+				h,
+			},
+		});
+	}
+	return glyphs;
 }
 
 export function usePdfLinkInk({
@@ -82,9 +124,9 @@ export function usePdfLinkInk({
 	itemsByPage,
 	citationLinks,
 	textLinks,
-}: UsePdfLinkInkOptions): ReadonlyMap<string, string> {
-	const [ink, setInk] = useState(() => new Map<string, string>());
-	const runsCacheRef = useRef(new Map<string, InkRun[]>());
+}: UsePdfLinkInkOptions): PdfLinkInkResult {
+	const [result, setResult] = useState<PdfLinkInkResult>(EMPTY_RESULT);
+	const runsCacheRef = useRef(new Map<string, CachedPage>());
 	const signatureRef = useRef("");
 	const pageKey = pagesToSample(itemsByPage, citationLinks, textLinks).join(
 		",",
@@ -97,7 +139,7 @@ export function usePdfLinkInk({
 		if (!engine || pageIndexes.length === 0) {
 			if (signatureRef.current !== "") {
 				signatureRef.current = "";
-				setInk(new Map());
+				setResult(EMPTY_RESULT);
 			}
 			return;
 		}
@@ -106,7 +148,7 @@ export function usePdfLinkInk({
 
 		let cancelled = false;
 		void (async () => {
-			const runsByPage = new Map<number, InkRun[]>();
+			const runsByPage = new Map<number, CachedPage>();
 			for (const pageIndex of pageIndexes) {
 				if (cancelled) return;
 				const cacheKey = `${docId}:${pageIndex}`;
@@ -116,37 +158,45 @@ export function usePdfLinkInk({
 					continue;
 				}
 				const page = doc.pages[pageIndex];
-				if (!page) continue;
-				let runs: InkRun[] = [];
+				if (!page || !(page.size.width > 0) || !(page.size.height > 0)) {
+					continue;
+				}
+				let cachedPage: CachedPage = { inkRuns: [], glyphs: [] };
 				try {
 					const pageRuns = await engine.getPageTextRuns(doc, page).toPromise();
-					runs = (pageRuns?.runs ?? []).map((run) => ({
-						rect: run.rect,
-						color: run.color,
-					}));
+					const raw = pageRuns?.runs ?? [];
+					cachedPage = {
+						inkRuns: raw.map((run) => ({
+							rect: run.rect,
+							color: run.color,
+						})),
+						glyphs: glyphRunsFrom(raw, page.size.width, page.size.height),
+					};
 				} catch {
-					runs = [];
+					cachedPage = { inkRuns: [], glyphs: [] };
 				}
 				if (cancelled) return;
-				runsCacheRef.current.set(cacheKey, runs);
-				runsByPage.set(pageIndex, runs);
+				runsCacheRef.current.set(cacheKey, cachedPage);
+				runsByPage.set(pageIndex, cachedPage);
 			}
 			if (cancelled) return;
 			const next = new Map<string, string>();
+			const glyphsByPage = new Map<number, readonly GlyphRun[]>();
 			for (const pageIndex of pageIndexes) {
-				const runs = runsByPage.get(pageIndex);
-				if (!runs) continue;
+				const page = runsByPage.get(pageIndex);
+				if (!page) continue;
+				glyphsByPage.set(pageIndex, page.glyphs);
 				for (const [key, color] of inkForTargets(
-					runs,
+					page.inkRuns,
 					targetsOnPage(pageIndex, citationLinks, textLinks),
 				)) {
 					next.set(key, color);
 				}
 			}
-			const signature = inkSignature(next);
+			const signature = `${inkSignature(next)}\n${pageIndexes.join(",")}`;
 			if (signature === signatureRef.current) return;
 			signatureRef.current = signature;
-			setInk(next);
+			setResult({ inkByKey: next, runsByPage: glyphsByPage });
 		})();
 
 		return () => {
@@ -154,5 +204,5 @@ export function usePdfLinkInk({
 		};
 	}, [citationLinks, docCapRef, docId, engine, pageKey, textLinks]);
 
-	return ink;
+	return result;
 }

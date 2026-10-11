@@ -27,6 +27,21 @@ export type TranslateLinkBox = {
 	color?: string;
 };
 
+/** One PDF text run, in normalized page fractions. */
+export type GlyphRun = {
+	text: string;
+	box: NormBox;
+};
+
+/**
+ * Source glyphs for the block being painted. Used to keep a multi-number
+ * citation from borrowing the next citation's link.
+ */
+export type LinkAssignContext = {
+	block: NormBox;
+	runs: readonly GlyphRun[];
+};
+
 export type PreservedLinkAssignment = {
 	start: number;
 	end: number;
@@ -138,10 +153,14 @@ function withLinkColor(
 type TextPiece = { start: number; end: number; text: string };
 
 /**
- * About 18 pt on an A4 page. Wider than a comma or hyphen inside `[17, 38]`,
- * narrower than the words that separate two citation groups.
+ * About 18 pt on an A4 page. A comma inside `[17, 38]` is inside this, and so
+ * is a normal word space, so the gap alone cannot separate `[17,38]` from a
+ * following `[46]`. The glyph test is what draws that line. This gap only
+ * applies when the source glyphs are not loaded yet.
  */
 const CLUSTER_GAP = 0.03;
+/** How far a link center may sit outside a source glyph and still belong to it. */
+const TOKEN_HIT_PAD = 0.003;
 
 function numberPieces(span: PreservedLinkSpan): TextPiece[] {
 	const pieces: TextPiece[] = [];
@@ -209,6 +228,18 @@ function sameLinkCluster(a: TranslateLinkBox, b: TranslateLinkBox): boolean {
 	return gap >= -0.008 && gap <= CLUSTER_GAP;
 }
 
+/**
+ * A rect that already covers the whole group is wider than the next citation.
+ * Do not treat that next citation as another number inside the group.
+ */
+function canExtendCluster(
+	prev: TranslateLinkBox,
+	next: TranslateLinkBox,
+): boolean {
+	if (!sameLinkCluster(prev, next)) return false;
+	return prev.box.w < next.box.w * 1.75;
+}
+
 function adjacentGotos(
 	gotos: readonly TranslateLinkBox[],
 	start: number,
@@ -225,10 +256,106 @@ function adjacentGotos(
 	) {
 		const next = gotos[index];
 		const prev = group[group.length - 1];
-		if (!next || !prev || used.has(next.key) || !sameLinkCluster(prev, next)) {
+		if (!next || !prev || used.has(next.key) || !canExtendCluster(prev, next)) {
 			break;
 		}
 		group.push(next);
+	}
+	return group;
+}
+
+function padBox(box: NormBox, pad: number): NormBox {
+	return {
+		x: box.x - pad,
+		y: box.y - pad,
+		w: box.w + pad * 2,
+		h: box.h + pad * 2,
+	};
+}
+
+type GlyphChar = { box: NormBox };
+
+/**
+ * Glyphs of the `occurrence`th copy of `token` inside `block`. Whitespace in
+ * the PDF run is ignored so `[17, 38]` still matches `[17,38]`.
+ */
+function tokenChars(
+	token: string,
+	runs: readonly GlyphRun[],
+	block: NormBox,
+	occurrence: number,
+): GlyphChar[] | null {
+	const needle = token.replace(/\s+/g, "");
+	if (!needle) return null;
+	const ordered = runs
+		.filter((run) => {
+			if (!run.text) return false;
+			const cx = run.box.x + run.box.w / 2;
+			const cy = run.box.y + run.box.h / 2;
+			return contains(block, cx, cy);
+		})
+		.sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+	const compact: GlyphChar[] = [];
+	let hay = "";
+	for (const run of ordered) {
+		const glyphs = [...run.text];
+		if (glyphs.length === 0) continue;
+		const step = run.box.w / glyphs.length;
+		for (let index = 0; index < glyphs.length; index++) {
+			const ch = glyphs[index];
+			if (!ch || /\s/.test(ch)) continue;
+			hay += ch;
+			compact.push({
+				box: {
+					x: run.box.x + index * step,
+					y: run.box.y,
+					w: step,
+					h: run.box.h,
+				},
+			});
+		}
+	}
+	let from = 0;
+	let at = -1;
+	for (let index = 0; index <= occurrence; index++) {
+		at = hay.indexOf(needle, from);
+		if (at < 0) return null;
+		from = at + needle.length;
+	}
+	const slice = compact.slice(at, at + needle.length);
+	return slice.length === needle.length ? slice : null;
+}
+
+function centerInChars(
+	link: TranslateLinkBox,
+	chars: readonly GlyphChar[],
+): boolean {
+	const cx = link.box.x + link.box.w / 2;
+	const cy = link.box.y + link.box.h / 2;
+	return chars.some((char) =>
+		contains(padBox(char.box, TOKEN_HIT_PAD), cx, cy),
+	);
+}
+
+/** Consecutive unread GoTo links whose centers sit on `chars`, capped at `limit`. */
+function linksInsideChars(
+	gotos: readonly TranslateLinkBox[],
+	start: number,
+	chars: readonly GlyphChar[],
+	limit: number,
+	used: Set<string>,
+): TranslateLinkBox[] {
+	if (limit < 2) return [];
+	const group: TranslateLinkBox[] = [];
+	for (
+		let index = start;
+		index < gotos.length && group.length < limit;
+		index++
+	) {
+		const link = gotos[index];
+		if (!link || used.has(link.key)) break;
+		if (!centerInChars(link, chars)) break;
+		group.push(link);
 	}
 	return group;
 }
@@ -237,11 +364,15 @@ function adjacentGotos(
  * Pair preserved tokens in `text` with `links` already claimed by this block.
  * URL tokens match by URL. Citation and ref tokens take the remaining GoTo
  * links in reading order. A bracket group with several numbers takes one
- * adjacent link per number, so `[17,38]` stays two targets.
+ * link per number when each of those links sits on that token's glyphs.
+ * A following citation on the same line stays with its own token. When the
+ * glyph count and the number count disagree, the whole token keeps the first
+ * link.
  */
 export function assignPreservedLinks(
 	text: string,
 	links: readonly TranslateLinkBox[],
+	context?: LinkAssignContext,
 ): PreservedLinkAssignment[] {
 	const unique = dedupeTranslateLinks(links);
 	const spans = findPreservedLinkSpans(text);
@@ -259,14 +390,22 @@ export function assignPreservedLinks(
 	const used = new Set<string>();
 	const gotos = unique.filter((link) => link.kind === "goto");
 	let gotoIndex = 0;
+	const seenTokens = new Map<string, number>();
 	const assigned: PreservedLinkAssignment[] = [];
 	for (const span of spans) {
 		const pieces = splittablePieces(span);
 		if (pieces) {
-			const group = adjacentGotos(gotos, gotoIndex, pieces.length, used);
-			if (group.length >= 2) {
-				const count = Math.min(group.length, pieces.length);
-				for (let index = 0; index < count; index++) {
+			const occurrence = seenTokens.get(span.text) ?? 0;
+			seenTokens.set(span.text, occurrence + 1);
+			const chars =
+				context && context.runs.length > 0
+					? tokenChars(span.text, context.runs, context.block, occurrence)
+					: null;
+			const group = chars
+				? linksInsideChars(gotos, gotoIndex, chars, pieces.length, used)
+				: adjacentGotos(gotos, gotoIndex, pieces.length, used);
+			if (group.length === pieces.length) {
+				for (let index = 0; index < pieces.length; index++) {
 					const piece = pieces[index];
 					const goto = group[index];
 					if (!piece || !goto) continue;
@@ -283,7 +422,7 @@ export function assignPreservedLinks(
 						),
 					);
 				}
-				gotoIndex += count;
+				gotoIndex += pieces.length;
 				continue;
 			}
 		}

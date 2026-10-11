@@ -22,6 +22,7 @@ import {
 	assignmentsWithin,
 	assignPreservedLinks,
 	claimTranslateLinks,
+	type GlyphRun,
 	type PreservedLinkAssignment,
 	type TranslateLinkBox,
 } from "@/lib/pdf/layout/translated-links";
@@ -59,6 +60,8 @@ type LayoutTranslateOverlayProps = {
 	 * targets so the English rectangles can stay under the glyphs.
 	 */
 	links?: readonly TranslateLinkBox[];
+	/** Source text runs for this page. Keeps grouped citations on their own glyphs. */
+	glyphRuns?: readonly GlyphRun[];
 	onOpenLink?: (assignment: PreservedLinkAssignment) => void;
 	onHoverLink?: (
 		assignment: PreservedLinkAssignment | null,
@@ -750,6 +753,7 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 	highlightQuotes,
 	sentenceRectsByItemId,
 	links,
+	glyphRuns,
 	onOpenLink,
 	onHoverLink,
 }: LayoutTranslateOverlayProps) {
@@ -792,6 +796,7 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 				: baseFs;
 			return {
 				...item,
+				sourceBbox: item.bbox,
 				bbox: expandLayoutTranslateBbox(
 					item,
 					layoutRegions,
@@ -838,6 +843,9 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 				const linkAssignments = assignPreservedLinks(
 					text,
 					linksByItem.get(item.id) ?? [],
+					glyphRuns?.length
+						? { block: item.sourceBbox, runs: glyphRuns }
+						: undefined,
 				);
 				const fontSize = item.paintFontSize;
 				const boxWidthPx = item.bbox.w * pageWidthPx;

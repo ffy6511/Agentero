@@ -455,6 +455,17 @@ export type PdfPageLayoutSlice = {
 	 * Absent until that page's text runs have been read.
 	 */
 	linkInkByKey?: ReadonlyMap<string, string>;
+	/**
+	 * PDF text runs for this page's translated blocks, in page fractions.
+	 * Lets a grouped citation stay inside its own glyphs.
+	 */
+	glyphRunsByPage?: ReadonlyMap<
+		number,
+		readonly {
+			text: string;
+			box: { x: number; y: number; w: number; h: number };
+		}[]
+	>;
 };
 
 /** Interaction modes that unmount or gate page layers. */
@@ -1049,6 +1060,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 				highlightQuotes={highlightQuotes}
 				sentenceRectsByItemId={layout.sentenceRectsByItemId}
 				links={translateLinkBoxes}
+				glyphRuns={layout.glyphRunsByPage?.get(pageIndex)}
 				onOpenLink={openTranslatedLink}
 				onHoverLink={hoverTranslatedLink}
 			/>

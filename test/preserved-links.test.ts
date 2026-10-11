@@ -157,6 +157,104 @@ describe("assignPreservedLinks", () => {
 		]);
 	});
 
+	it("does not borrow the next citation when one annotation covers the group", () => {
+		const text = "环境 [17,38] 随后 [46]。";
+		const assigned = assignPreservedLinks(text, [
+			{
+				key: "group",
+				kind: "goto",
+				box: { x: 0.39, y: 0.51, w: 0.05, h: 0.012 },
+			},
+			{
+				key: "n46",
+				kind: "goto",
+				box: { x: 0.452, y: 0.51, w: 0.022, h: 0.012 },
+			},
+		]);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[17,38]", "group"],
+			["[46]", "n46"],
+		]);
+	});
+
+	it("keeps a later citation outside the source token even when the gap is small", () => {
+		const text = "见 [17,38] 随后 [46]。";
+		const assigned = assignPreservedLinks(
+			text,
+			[
+				{
+					key: "group",
+					kind: "goto",
+					box: { x: 0.3, y: 0.51, w: 0.025, h: 0.012 },
+				},
+				{
+					key: "n46",
+					kind: "goto",
+					box: { x: 0.345, y: 0.51, w: 0.02, h: 0.012 },
+				},
+			],
+			{
+				block: { x: 0.2, y: 0.48, w: 0.4, h: 0.08 },
+				runs: [
+					{
+						text: "[17,38]",
+						box: { x: 0.3, y: 0.51, w: 0.035, h: 0.012 },
+					},
+					{
+						text: "[46]",
+						box: { x: 0.345, y: 0.51, w: 0.02, h: 0.012 },
+					},
+				],
+			},
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[17,38]", "group"],
+			["[46]", "n46"],
+		]);
+	});
+
+	it("splits when each number's link sits on the source token", () => {
+		const text = "见 [17,38] 随后 [46]。";
+		const assigned = assignPreservedLinks(
+			text,
+			[
+				{
+					key: "n17",
+					kind: "goto",
+					box: { x: 0.31, y: 0.51, w: 0.02, h: 0.012 },
+				},
+				{
+					key: "n38",
+					kind: "goto",
+					box: { x: 0.34, y: 0.51, w: 0.02, h: 0.012 },
+				},
+				{
+					key: "n46",
+					kind: "goto",
+					box: { x: 0.7, y: 0.51, w: 0.02, h: 0.012 },
+				},
+			],
+			{
+				block: { x: 0.2, y: 0.48, w: 0.6, h: 0.08 },
+				runs: [
+					{
+						text: "[17,38]",
+						box: { x: 0.3, y: 0.51, w: 0.08, h: 0.012 },
+					},
+					{
+						text: "[46]",
+						box: { x: 0.7, y: 0.51, w: 0.02, h: 0.012 },
+					},
+				],
+			},
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["17", "n17"],
+			["38", "n38"],
+			["[46]", "n46"],
+		]);
+	});
+
 	it("keeps one bracket group when the next link is not beside it", () => {
 		const text = "见 [17,38]，另见 [46]。";
 		const assigned = assignPreservedLinks(text, [

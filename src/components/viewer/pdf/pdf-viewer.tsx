@@ -151,6 +151,10 @@ import {
 	type PdfLayoutRegion,
 	setFocusedLayoutRegion,
 } from "@/lib/pdf/layout";
+import {
+	clearTranslatedLinkSource,
+	publishTranslatedLinkSource,
+} from "@/lib/pdf/layout/translated-link-source";
 import { selectionAnchorFromVisible } from "@/lib/pdf/layout/visible-selection-rects";
 import {
 	type ActiveSelectionCard,
@@ -1660,14 +1664,22 @@ function PdfViewerInner({
 		itemsByPage: layoutTranslateItemsByPage,
 		highlightQuotesByPage,
 	});
-	const linkInkByKey = usePdfLinkInk({
-		engine,
-		docCapRef,
-		docId,
-		itemsByPage: layoutTranslateItemsByPage,
-		citationLinks,
-		textLinks,
-	});
+	useEffect(() => {
+		if (translationPane) return;
+		publishTranslatedLinkSource(baseDocId, { citationLinks, textLinks });
+		return () => clearTranslatedLinkSource(baseDocId);
+	}, [translationPane, baseDocId, citationLinks, textLinks]);
+
+	const { inkByKey: linkInkByKey, runsByPage: glyphRunsByPage } = usePdfLinkInk(
+		{
+			engine,
+			docCapRef,
+			docId,
+			itemsByPage: layoutTranslateItemsByPage,
+			citationLinks,
+			textLinks,
+		},
+	);
 
 	const pageMarks = useMemo<PdfPageMarksSlice>(
 		() => ({
@@ -1730,6 +1742,7 @@ function PdfViewerInner({
 					: new Map(),
 			sentenceRectsByItemId,
 			linkInkByKey,
+			glyphRunsByPage,
 		}),
 		[
 			hoverableRegionsByPage,
@@ -1741,6 +1754,7 @@ function PdfViewerInner({
 			dualPaneTranslate,
 			sentenceRectsByItemId,
 			linkInkByKey,
+			glyphRunsByPage,
 		],
 	);
 

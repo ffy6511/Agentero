@@ -4,20 +4,35 @@
  * hooks that throw on missing plugins are never called here.
  */
 
+import type { PdfLinkAnnoObject } from "@embedpdf/models";
+import { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
 import {
 	GlobalPointerProvider,
 	useInteractionManagerCapability,
 } from "@embedpdf/plugin-interaction-manager/react";
-import { type PageLayout, Scroller } from "@embedpdf/plugin-scroll/react";
+import {
+	type PageLayout,
+	Scroller,
+	useScroll,
+} from "@embedpdf/plugin-scroll/react";
 import { useZoom, ZoomGestureWrapper } from "@embedpdf/plugin-zoom/react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useSyncExternalStore,
+} from "react";
 import { EMPTY_LAYOUT_REGIONS_BY_PAGE } from "@/components/viewer/pdf/constants";
+import { usePdfEngineContext } from "@/components/viewer/pdf/engine-provider";
 import { usePdfLayoutRegions } from "@/components/viewer/pdf/hooks/use-pdf-layout-regions";
 import { usePdfLayoutTranslate } from "@/components/viewer/pdf/hooks/use-pdf-layout-translate";
+import { usePdfLinkInk } from "@/components/viewer/pdf/hooks/use-pdf-link-ink";
 import { usePdfPaperTone } from "@/components/viewer/pdf/hooks/use-pdf-paper-tone";
 import { usePdfReadingMode } from "@/components/viewer/pdf/hooks/use-pdf-reading-mode";
 import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-sync";
 import { usePdfZoomControls } from "@/components/viewer/pdf/hooks/use-pdf-zoom-controls";
+import { getLinkDestination } from "@/components/viewer/pdf/layers/citation-links";
 import {
 	type PdfPageHandlers,
 	PdfPageLayers,
@@ -29,10 +44,15 @@ import type { PdfViewerInnerProps } from "@/components/viewer/pdf/types";
 import { DockviewViewport } from "@/components/viewer/pdf/viewport/dockview-viewport";
 import { PanDragHandler } from "@/components/viewer/pdf/viewport/pan-handler";
 import { WheelZoomHandler } from "@/components/viewer/pdf/viewport/wheel-zoom-handler";
+import { openExternalUrl } from "@/lib/core/open-external";
 import {
 	mirrorLayoutResultToTranslation,
 	translationSourceKey,
 } from "@/lib/pdf/layout";
+import {
+	getTranslatedLinkSource,
+	subscribeTranslatedLinkSource,
+} from "@/lib/pdf/layout/translated-link-source";
 
 const EMPTY_PAGE_MAP = new Map();
 
@@ -105,6 +125,13 @@ export function PdfTranslationViewerInner({
 }: PdfViewerInnerProps) {
 	usePdfScrollSync(docId);
 	usePdfReadingMode(docId);
+	const { provides: scroll } = useScroll(docId);
+	const scrollRef = useRef(scroll);
+	scrollRef.current = scroll;
+	const { provides: docCap } = useDocumentManagerCapability();
+	const docCapRef = useRef(docCap);
+	docCapRef.current = docCap;
+	const { engine } = usePdfEngineContext();
 	// Interaction manager is registered; keep the capability subscribed so
 	// GlobalPointerProvider / pan-zoom gestures stay wired.
 	useInteractionManagerCapability();
@@ -198,6 +225,32 @@ export function PdfTranslationViewerInner({
 		return () => onHandle?.(null);
 	}, [onHandle]);
 
+	const sourceKey = translationSourceKey(docId);
+	const linkSource = useSyncExternalStore(
+		subscribeTranslatedLinkSource,
+		() => getTranslatedLinkSource(sourceKey),
+		() => getTranslatedLinkSource(sourceKey),
+	);
+	const { inkByKey: linkInkByKey, runsByPage: glyphRunsByPage } = usePdfLinkInk(
+		{
+			engine,
+			docCapRef,
+			docId,
+			itemsByPage: layoutTranslateItemsByPage,
+			citationLinks: linkSource.citationLinks,
+			textLinks: linkSource.textLinks,
+		},
+	);
+
+	const pageMarks = useMemo<PdfPageMarksSlice>(
+		() => ({
+			...EMPTY_MARKS,
+			citationLinks: linkSource.citationLinks,
+			textLinks: linkSource.textLinks,
+		}),
+		[linkSource],
+	);
+
 	const pageLayout = useMemo<PdfPageLayoutSlice>(
 		() => ({
 			hoverableRegionsByPage: EMPTY_LAYOUT_REGIONS_BY_PAGE,
@@ -205,20 +258,58 @@ export function PdfTranslationViewerInner({
 			layoutOverlayVisible: false,
 			layoutTranslateItemsByPage,
 			layoutTranslatePageStateByPage,
+			linkInkByKey,
+			glyphRunsByPage,
 		}),
 		[
 			rawRegionsByPage,
 			layoutTranslateItemsByPage,
 			layoutTranslatePageStateByPage,
+			linkInkByKey,
+			glyphRunsByPage,
 		],
+	);
+
+	const activateCitation = useCallback(
+		(link: PdfLinkAnnoObject) => {
+			const destination = getLinkDestination(link.target);
+			if (!destination) return;
+			const page =
+				docCapRef.current?.getDocument(docId)?.pages[destination.pageIndex];
+			const height = page?.size.height ?? 0;
+			const width = page?.size.width ?? 0;
+			const anchored = destination.pdfY > 0 || destination.pdfX != null;
+			// Destinations are PDF user space (origin bottom-left). scrollToPage
+			// takes the page box (origin top-left), same as layout-region jumps.
+			scrollRef.current?.scrollToPage({
+				pageNumber: destination.pageIndex + 1,
+				behavior: "instant",
+				...(anchored && height > 0
+					? {
+							pageCoordinates: {
+								x:
+									destination.pdfX != null && width > 0
+										? Math.max(0, destination.pdfX)
+										: 0,
+								y: Math.max(0, height - destination.pdfY),
+							},
+							alignX: 0,
+							alignY: 18,
+						}
+					: {}),
+			});
+		},
+		[docId],
 	);
 
 	const pageHandlers = useMemo<PdfPageHandlers>(
 		() => ({
 			...EMPTY_HANDLERS,
 			onTogglePageLayoutTranslate: togglePageLayoutTranslate,
+			onCitationActivate: activateCitation,
+			onTextLinkActivate: openExternalUrl,
 		}),
-		[togglePageLayoutTranslate],
+		[togglePageLayoutTranslate, activateCitation],
 	);
 
 	const renderPage = useCallback(
@@ -231,13 +322,13 @@ export function PdfTranslationViewerInner({
 				tone={pdfTone}
 				zoomRef={zoomRef}
 				annotationCap={null}
-				marks={EMPTY_MARKS}
+				marks={pageMarks}
 				layout={pageLayout}
 				mode={PAGE_MODE}
 				handlers={pageHandlers}
 			/>
 		),
-		[docId, pdfTone, zoomRef, pageLayout, pageHandlers],
+		[docId, pdfTone, zoomRef, pageMarks, pageLayout, pageHandlers],
 	);
 
 	return (
