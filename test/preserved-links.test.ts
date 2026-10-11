@@ -255,6 +255,84 @@ describe("assignPreservedLinks", () => {
 		]);
 	});
 
+	it("keeps each citation when the translation reverses two clauses", () => {
+		const source = "前半引用 [1]，后半引用 [2]。";
+		const translated = "后半引用 [2]，前半引用 [1]。";
+		const assigned = assignPreservedLinks(
+			translated,
+			[
+				{
+					key: "n1",
+					kind: "goto",
+					box: { x: 0.2, y: 0.51, w: 0.02, h: 0.012 },
+				},
+				{
+					key: "n2",
+					kind: "goto",
+					box: { x: 0.55, y: 0.51, w: 0.02, h: 0.012 },
+				},
+			],
+			{ source },
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[2]", "n2"],
+			["[1]", "n1"],
+		]);
+	});
+
+	it("keeps a grouped citation's links when that group moves after the next cite", () => {
+		const source = "见 [17,38]，另见 [46]。";
+		const translated = "另见 [46]，见 [17,38]。";
+		const assigned = assignPreservedLinks(
+			translated,
+			[
+				{
+					key: "n17",
+					kind: "goto",
+					box: { x: 0.39, y: 0.51, w: 0.022, h: 0.011 },
+				},
+				{
+					key: "n38",
+					kind: "goto",
+					box: { x: 0.418, y: 0.51, w: 0.022, h: 0.011 },
+				},
+				{
+					key: "n46",
+					kind: "goto",
+					box: { x: 0.7, y: 0.51, w: 0.022, h: 0.011 },
+				},
+			],
+			{ source },
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[46]", "n46"],
+			["17", "n17"],
+			["38", "n38"],
+		]);
+	});
+
+	it("pairs a rewritten marker with the remaining links in source order", () => {
+		const assigned = assignPreservedLinks(
+			"参见 [9]。",
+			[
+				{
+					key: "n1",
+					kind: "goto",
+					box: { x: 0.2, y: 0.51, w: 0.02, h: 0.012 },
+				},
+				{
+					key: "n2",
+					kind: "goto",
+					box: { x: 0.55, y: 0.51, w: 0.02, h: 0.012 },
+				},
+			],
+			{ source: "见 [1] 与 [2]。" },
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[9]", "n1"],
+		]);
+	});
+
 	it("keeps one bracket group when the next link is not beside it", () => {
 		const text = "见 [17,38]，另见 [46]。";
 		const assigned = assignPreservedLinks(text, [

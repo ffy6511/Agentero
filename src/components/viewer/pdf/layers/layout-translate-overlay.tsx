@@ -843,9 +843,12 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 				const linkAssignments = assignPreservedLinks(
 					text,
 					linksByItem.get(item.id) ?? [],
-					glyphRuns?.length
-						? { block: item.sourceBbox, runs: glyphRuns }
-						: undefined,
+					{
+						source: item.source,
+						...(glyphRuns?.length
+							? { block: item.sourceBbox, runs: glyphRuns }
+							: {}),
+					},
 				);
 				const fontSize = item.paintFontSize;
 				const boxWidthPx = item.bbox.w * pageWidthPx;

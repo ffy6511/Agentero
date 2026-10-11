@@ -34,12 +34,15 @@ export type GlyphRun = {
 };
 
 /**
- * Source glyphs for the block being painted. Used to keep a multi-number
- * citation from borrowing the next citation's link.
+ * Source text and glyphs for the block being painted.
+ * `source` keeps a reordered clause on the citation it came from.
+ * Glyphs keep a multi-number citation from borrowing the next citation.
  */
 export type LinkAssignContext = {
-	block: NormBox;
-	runs: readonly GlyphRun[];
+	/** English text this block was translated from. */
+	source?: string;
+	block?: NormBox;
+	runs?: readonly GlyphRun[];
 };
 
 export type PreservedLinkAssignment = {
@@ -360,14 +363,221 @@ function linksInsideChars(
 	return group;
 }
 
+type BoundPart = {
+	relStart: number;
+	relEnd: number;
+	text: string;
+	key: string | null;
+	url?: string;
+	color?: string;
+};
+
+type SpanBinding = {
+	text: string;
+	start: number;
+	parts: BoundPart[];
+};
+
+function compactToken(text: string): string {
+	return text.replace(/\s+/g, "");
+}
+
+function partFromAssignment(
+	spanStart: number,
+	assignment: PreservedLinkAssignment,
+): BoundPart {
+	const part: BoundPart = {
+		relStart: assignment.start - spanStart,
+		relEnd: assignment.end - spanStart,
+		text: assignment.text,
+		key: assignment.key,
+	};
+	if (assignment.url) part.url = assignment.url;
+	if (assignment.color) part.color = assignment.color;
+	return part;
+}
+
+function assignmentFromPart(
+	origin: number,
+	part: BoundPart,
+): PreservedLinkAssignment {
+	const assignment: PreservedLinkAssignment = {
+		start: origin + part.relStart,
+		end: origin + part.relEnd,
+		text: part.text,
+		key: part.key,
+	};
+	if (part.url) assignment.url = part.url;
+	if (part.color) assignment.color = part.color;
+	return assignment;
+}
+
+/**
+ * Bind `spans` to `links` in the order those spans appear. Glyph clustering
+ * uses the PDF text layer, so this order has to be the English source order.
+ */
+function collectBindings(
+	links: readonly TranslateLinkBox[],
+	spans: readonly PreservedLinkSpan[],
+	context?: LinkAssignContext,
+): SpanBinding[] {
+	const used = new Set<string>();
+	const gotos = links.filter((link) => link.kind === "goto");
+	let gotoIndex = 0;
+	const seenTokens = new Map<string, number>();
+	const bindings: SpanBinding[] = [];
+	for (const span of spans) {
+		const parts: BoundPart[] = [];
+		const pieces = splittablePieces(span);
+		if (pieces) {
+			const occurrence = seenTokens.get(span.text) ?? 0;
+			seenTokens.set(span.text, occurrence + 1);
+			const chars =
+				context?.block && context.runs && context.runs.length > 0
+					? tokenChars(span.text, context.runs, context.block, occurrence)
+					: null;
+			const group = chars
+				? linksInsideChars(gotos, gotoIndex, chars, pieces.length, used)
+				: adjacentGotos(gotos, gotoIndex, pieces.length, used);
+			if (group.length === pieces.length) {
+				for (let index = 0; index < pieces.length; index++) {
+					const piece = pieces[index];
+					const goto = group[index];
+					if (!piece || !goto) continue;
+					used.add(goto.key);
+					parts.push(
+						partFromAssignment(
+							span.start,
+							withLinkColor(
+								{
+									start: piece.start,
+									end: piece.end,
+									text: piece.text,
+									key: goto.key,
+								},
+								goto,
+							),
+						),
+					);
+				}
+				gotoIndex += pieces.length;
+				bindings.push({ text: span.text, start: span.start, parts });
+				continue;
+			}
+		}
+		const hit = matchSpan(span, links, gotos, used, gotoIndex);
+		if (hit.gotoIndex !== gotoIndex) gotoIndex = hit.gotoIndex;
+		if (hit.assignment)
+			parts.push(partFromAssignment(span.start, hit.assignment));
+		bindings.push({ text: span.text, start: span.start, parts });
+	}
+	return bindings;
+}
+
+function bindingsInOrder(
+	text: string,
+	links: readonly TranslateLinkBox[],
+	context?: LinkAssignContext,
+): PreservedLinkAssignment[] {
+	return collectBindings(links, findPreservedLinkSpans(text), context).flatMap(
+		(binding) =>
+			binding.parts.map((part) => assignmentFromPart(binding.start, part)),
+	);
+}
+
+/**
+ * Translated spans keep the link of the source span with the same label.
+ * A label the source does not have falls back to the remaining GoTo order.
+ */
+function assignBySourceIdentity(
+	spans: readonly PreservedLinkSpan[],
+	source: string,
+	links: readonly TranslateLinkBox[],
+	context?: LinkAssignContext,
+): PreservedLinkAssignment[] {
+	const queues = new Map<string, SpanBinding[]>();
+	for (const binding of collectBindings(
+		links,
+		findPreservedLinkSpans(source),
+		context,
+	)) {
+		const key = compactToken(binding.text);
+		const queue = queues.get(key);
+		if (queue) queue.push(binding);
+		else queues.set(key, [binding]);
+	}
+	const used = new Set<string>();
+	const assigned: PreservedLinkAssignment[] = [];
+	const unmatched: PreservedLinkSpan[] = [];
+	for (const span of spans) {
+		const binding = queues.get(compactToken(span.text))?.shift();
+		if (!binding) {
+			unmatched.push(span);
+			continue;
+		}
+		if (span.text === binding.text) {
+			for (const part of binding.parts) {
+				if (part.key) used.add(part.key);
+				assigned.push(assignmentFromPart(span.start, part));
+			}
+			continue;
+		}
+		const pieces = splittablePieces(span);
+		const pieceTexts = pieces?.map((piece) => piece.text).join("\0");
+		const boundTexts = binding.parts.map((part) => part.text).join("\0");
+		if (pieces && pieceTexts === boundTexts) {
+			for (let index = 0; index < pieces.length; index++) {
+				const piece = pieces[index];
+				const part = binding.parts[index];
+				if (!piece || !part) continue;
+				if (part.key) used.add(part.key);
+				const assignment: PreservedLinkAssignment = {
+					start: piece.start,
+					end: piece.end,
+					text: piece.text,
+					key: part.key,
+				};
+				if (part.url) assignment.url = part.url;
+				if (part.color) assignment.color = part.color;
+				assigned.push(assignment);
+			}
+			continue;
+		}
+		const first = binding.parts[0];
+		if (!first) continue;
+		if (first.key) used.add(first.key);
+		const whole: PreservedLinkAssignment = {
+			start: span.start,
+			end: span.end,
+			text: span.text,
+			key: first.key,
+		};
+		if (first.url) whole.url = first.url;
+		if (first.color) whole.color = first.color;
+		assigned.push(whole);
+	}
+	if (unmatched.length > 0) {
+		const remaining = links.filter((link) => !used.has(link.key));
+		assigned.push(
+			...collectBindings(remaining, unmatched).flatMap((binding) =>
+				binding.parts.map((part) => assignmentFromPart(binding.start, part)),
+			),
+		);
+	}
+	assigned.sort((a, b) => a.start - b.start || a.end - b.end);
+	return assigned;
+}
+
 /**
  * Pair preserved tokens in `text` with `links` already claimed by this block.
- * URL tokens match by URL. Citation and ref tokens take the remaining GoTo
- * links in reading order. A bracket group with several numbers takes one
- * link per number when each of those links sits on that token's glyphs.
- * A following citation on the same line stays with its own token. When the
- * glyph count and the number count disagree, the whole token keeps the first
- * link.
+ * URL tokens match by URL. Citation and ref tokens take GoTo links in source
+ * order. When `context.source` is set, a translated token keeps the link of
+ * the source token with the same label, so a reordered clause still opens
+ * the citation it was translated from. A bracket group with several numbers
+ * takes one link per number when each of those links sits on that token's
+ * glyphs. A following citation on the same line stays with its own token.
+ * When the glyph count and the number count disagree, the whole token keeps
+ * the first link.
  */
 export function assignPreservedLinks(
 	text: string,
@@ -387,51 +597,11 @@ export function assignPreservedLinks(
 				url: span.url,
 			}));
 	}
-	const used = new Set<string>();
-	const gotos = unique.filter((link) => link.kind === "goto");
-	let gotoIndex = 0;
-	const seenTokens = new Map<string, number>();
-	const assigned: PreservedLinkAssignment[] = [];
-	for (const span of spans) {
-		const pieces = splittablePieces(span);
-		if (pieces) {
-			const occurrence = seenTokens.get(span.text) ?? 0;
-			seenTokens.set(span.text, occurrence + 1);
-			const chars =
-				context && context.runs.length > 0
-					? tokenChars(span.text, context.runs, context.block, occurrence)
-					: null;
-			const group = chars
-				? linksInsideChars(gotos, gotoIndex, chars, pieces.length, used)
-				: adjacentGotos(gotos, gotoIndex, pieces.length, used);
-			if (group.length === pieces.length) {
-				for (let index = 0; index < pieces.length; index++) {
-					const piece = pieces[index];
-					const goto = group[index];
-					if (!piece || !goto) continue;
-					used.add(goto.key);
-					assigned.push(
-						withLinkColor(
-							{
-								start: piece.start,
-								end: piece.end,
-								text: piece.text,
-								key: goto.key,
-							},
-							goto,
-						),
-					);
-				}
-				gotoIndex += pieces.length;
-				continue;
-			}
-		}
-		const hit = matchSpan(span, unique, gotos, used, gotoIndex);
-		if (hit.gotoIndex !== gotoIndex) gotoIndex = hit.gotoIndex;
-		if (!hit.assignment) continue;
-		assigned.push(hit.assignment);
+	const source = context?.source;
+	if (source && source !== text && findPreservedLinkSpans(source).length > 0) {
+		return assignBySourceIdentity(spans, source, unique, context);
 	}
-	return assigned;
+	return bindingsInOrder(text, unique, context);
 }
 
 function matchSpan(
