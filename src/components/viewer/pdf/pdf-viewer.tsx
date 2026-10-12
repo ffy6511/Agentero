@@ -903,6 +903,7 @@ function PdfViewerInner({
 		handleCitationLinkHover,
 		hasCitationMatch,
 		citationImport,
+		pageOrigins,
 	} = usePdfCitations({
 		docId,
 		annotationCap,
@@ -1666,9 +1667,8 @@ function PdfViewerInner({
 	});
 	useEffect(() => {
 		if (translationPane) return;
-		publishTranslatedLinkSource(baseDocId, { citationLinks, textLinks });
 		return () => clearTranslatedLinkSource(baseDocId);
-	}, [translationPane, baseDocId, citationLinks, textLinks]);
+	}, [translationPane, baseDocId]);
 
 	const { inkByKey: linkInkByKey, runsByPage: glyphRunsByPage } = usePdfLinkInk(
 		{
@@ -1678,8 +1678,28 @@ function PdfViewerInner({
 			itemsByPage: layoutTranslateItemsByPage,
 			citationLinks,
 			textLinks,
+			scrollRef,
+			scrollReady,
 		},
 	);
+	useEffect(() => {
+		if (translationPane) return;
+		publishTranslatedLinkSource(baseDocId, {
+			citationLinks,
+			textLinks,
+			pageOrigins,
+			inkByKey: linkInkByKey,
+			glyphRunsByPage,
+		});
+	}, [
+		translationPane,
+		baseDocId,
+		citationLinks,
+		textLinks,
+		pageOrigins,
+		linkInkByKey,
+		glyphRunsByPage,
+	]);
 
 	const pageMarks = useMemo<PdfPageMarksSlice>(
 		() => ({

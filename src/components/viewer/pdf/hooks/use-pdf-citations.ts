@@ -66,6 +66,8 @@ type AnnotationCapabilityProvides = ReturnType<
 	typeof useAnnotationCapability
 >["provides"];
 
+const EMPTY_PAGE_ORIGINS: readonly PageOrigin[] = [];
+
 export type UsePdfCitationsOptions = {
 	docId: string;
 	/** EmbedPDF capability; owned by `PdfViewerInner` (plugin context). */
@@ -138,6 +140,8 @@ export type PdfCitations = {
 		importingId: string | null;
 		importCitation: (citation: Citation, parentDir: string) => void;
 	} | null;
+	/** Visible-box origins. Empty until the destination map has been parsed. */
+	pageOrigins: readonly PageOrigin[];
 };
 
 /**
@@ -350,6 +354,8 @@ export function usePdfCitations({
 	const citationLinksRef = useRef<CitationLinkKeyList | null>(null);
 	/** Visible page box origins; the jump flash is drawn in page space. */
 	const pageOriginsRef = useRef<readonly PageOrigin[] | null>(null);
+	const [pageOrigins, setPageOrigins] =
+		useState<readonly PageOrigin[]>(EMPTY_PAGE_ORIGINS);
 	/** Mirrored so a late bytes prop never re-triggers the build effect. */
 	const sourceBytesRef = useRef<ArrayBuffer | null>(sourceBytes);
 	sourceBytesRef.current = sourceBytes;
@@ -357,6 +363,7 @@ export function usePdfCitations({
 		destKeyMapRef.current = null;
 		citationLinksRef.current = null;
 		pageOriginsRef.current = null;
+		setPageOrigins(EMPTY_PAGE_ORIGINS);
 		const canBuildLocal = Boolean(paperAbsPath);
 		const canBuildRemote = isRemotePaper && sourceBytesRef.current;
 		if (!canBuildLocal && !canBuildRemote) return;
@@ -372,6 +379,7 @@ export function usePdfCitations({
 				destKeyMapRef.current = maps.cites;
 				citationLinksRef.current = maps.citationLinks;
 				pageOriginsRef.current = maps.pageOrigins;
+				setPageOrigins(maps.pageOrigins);
 				if (isRemotePaper) {
 					citationsRef.current = buildRemoteCitations(
 						maps.cites,
@@ -500,5 +508,6 @@ export function usePdfCitations({
 		handleCitationLinkHover,
 		hasCitationMatch,
 		citationImport,
+		pageOrigins,
 	};
 }

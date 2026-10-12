@@ -1,11 +1,14 @@
 /**
  * Raw PDF fill for each link that a translated page still has to paint.
- * Text runs are read once per page. The hex stays in PDF space; the overlay
- * applies the paper tone when it draws the token.
+ * Text runs are read once per mounted page and published as each page
+ * finishes. The hex stays in PDF space; the overlay applies the paper tone
+ * when it draws the token. The dual-pane companion reads the published
+ * result instead of sampling the PDF a second time.
  */
 
 import type { PdfEngine, PdfLinkAnnoObject } from "@embedpdf/models";
 import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
+import type { ScrollScope } from "@embedpdf/plugin-scroll";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import type { PdfTextLink } from "@/components/viewer/pdf/layers/citation-links";
 import {
@@ -28,21 +31,60 @@ export type UsePdfLinkInkOptions = {
 	itemsByPage: ReadonlyMap<number, readonly LayoutTranslateItem[]>;
 	citationLinks: ReadonlyMap<number, readonly PdfLinkAnnoObject[]>;
 	textLinks: ReadonlyMap<number, readonly PdfTextLink[]>;
+	/** Source viewer scroll scope. A fresh object each render; read via ref. */
+	scrollRef: RefObject<ScrollScope | null>;
+	scrollReady: boolean;
 };
 
-function pagesToSample(
+/**
+ * Mounted pages that still have a translation block and at least one link.
+ * `mountedPageIndexes` is the scroll buffer (0-based), not every translated
+ * page: a full-document job puts a pending item on each page immediately.
+ * Order follows `mountedPageIndexes`, with duplicates dropped.
+ */
+export function mountedLinkPages(
 	itemsByPage: ReadonlyMap<number, readonly LayoutTranslateItem[]>,
 	citationLinks: ReadonlyMap<number, readonly PdfLinkAnnoObject[]>,
 	textLinks: ReadonlyMap<number, readonly PdfTextLink[]>,
+	mountedPageIndexes: readonly number[],
 ): number[] {
 	const pages: number[] = [];
-	for (const pageIndex of itemsByPage.keys()) {
+	const seen = new Set<number>();
+	for (const pageIndex of mountedPageIndexes) {
+		if (seen.has(pageIndex) || !itemsByPage.has(pageIndex)) continue;
 		const citations = citationLinks.get(pageIndex)?.length ?? 0;
 		const texts = textLinks.get(pageIndex)?.length ?? 0;
 		if (citations + texts === 0) continue;
+		seen.add(pageIndex);
 		pages.push(pageIndex);
 	}
-	pages.sort((a, b) => a - b);
+	return pages;
+}
+
+/**
+ * PDF page indexes currently mounted by the scroller.
+ * `renderedPageIndexes` indexes virtual rows, not pages; a spread row holds
+ * two pages. Visible pages come first so the open page is not stuck behind
+ * the buffer.
+ */
+function mountedPageIndexes(scope: ScrollScope): number[] {
+	const metrics = scope.getMetrics();
+	const layout = scope.getLayout();
+	const visible = new Set(metrics.visiblePages.map((page) => page - 1));
+	const pages: number[] = [];
+	const seen = new Set<number>();
+	for (const itemIndex of metrics.renderedPageIndexes) {
+		const item = layout.virtualItems[itemIndex];
+		if (!item) continue;
+		for (const page of item.pageLayouts) {
+			if (seen.has(page.pageIndex)) continue;
+			seen.add(page.pageIndex);
+			pages.push(page.pageIndex);
+		}
+	}
+	pages.sort(
+		(a, b) => Number(visible.has(b)) - Number(visible.has(a)) || a - b,
+	);
 	return pages;
 }
 
@@ -124,13 +166,42 @@ export function usePdfLinkInk({
 	itemsByPage,
 	citationLinks,
 	textLinks,
+	scrollRef,
+	scrollReady,
 }: UsePdfLinkInkOptions): PdfLinkInkResult {
 	const [result, setResult] = useState<PdfLinkInkResult>(EMPTY_RESULT);
+	const [mountedKey, setMountedKey] = useState("");
 	const runsCacheRef = useRef(new Map<string, CachedPage>());
 	const signatureRef = useRef("");
-	const pageKey = pagesToSample(itemsByPage, citationLinks, textLinks).join(
-		",",
-	);
+	const pageKey = mountedLinkPages(
+		itemsByPage,
+		citationLinks,
+		textLinks,
+		mountedKey ? mountedKey.split(",").map((value) => Number(value)) : [],
+	).join(",");
+
+	useEffect(() => {
+		if (!scrollReady || !docId) return;
+		const scope = scrollRef.current;
+		if (!scope) return;
+		const read = () => {
+			let next = "";
+			try {
+				next = mountedPageIndexes(scope).join(",");
+			} catch {
+				// Metrics throw until this document has a scroll layout.
+				return;
+			}
+			setMountedKey((prev) => (prev === next ? prev : next));
+		};
+		read();
+		const offScroll = scope.onScroll(() => read());
+		const offLayout = scope.onLayoutChange(() => read());
+		return () => {
+			offScroll();
+			offLayout();
+		};
+	}, [docId, scrollReady, scrollRef]);
 
 	useEffect(() => {
 		const pageIndexes = pageKey
@@ -147,16 +218,41 @@ export function usePdfLinkInk({
 		if (!doc) return;
 
 		let cancelled = false;
+		const publish = (
+			ink: ReadonlyMap<string, string>,
+			glyphsByPage: ReadonlyMap<number, readonly GlyphRun[]>,
+		) => {
+			if (cancelled) return;
+			const signature = `${inkSignature(ink)}\n${pageIndexes.join(",")}`;
+			if (signature === signatureRef.current) return;
+			signatureRef.current = signature;
+			setResult({
+				inkByKey: new Map(ink),
+				runsByPage: new Map(glyphsByPage),
+			});
+		};
+
 		void (async () => {
-			const runsByPage = new Map<number, CachedPage>();
-			for (const pageIndex of pageIndexes) {
-				if (cancelled) return;
-				const cacheKey = `${docId}:${pageIndex}`;
-				const cached = runsCacheRef.current.get(cacheKey);
-				if (cached) {
-					runsByPage.set(pageIndex, cached);
-					continue;
+			const ink = new Map<string, string>();
+			const glyphsByPage = new Map<number, readonly GlyphRun[]>();
+			const pending: number[] = [];
+			const absorb = (pageIndex: number, page: CachedPage) => {
+				glyphsByPage.set(pageIndex, page.glyphs);
+				for (const [key, color] of inkForTargets(
+					page.inkRuns,
+					targetsOnPage(pageIndex, citationLinks, textLinks),
+				)) {
+					ink.set(key, color);
 				}
+			};
+			for (const pageIndex of pageIndexes) {
+				const cached = runsCacheRef.current.get(`${docId}:${pageIndex}`);
+				if (cached) absorb(pageIndex, cached);
+				else pending.push(pageIndex);
+			}
+			publish(ink, glyphsByPage);
+			for (const pageIndex of pending) {
+				if (cancelled) return;
 				const page = doc.pages[pageIndex];
 				if (!page || !(page.size.width > 0) || !(page.size.height > 0)) {
 					continue;
@@ -175,28 +271,11 @@ export function usePdfLinkInk({
 				} catch {
 					cachedPage = { inkRuns: [], glyphs: [] };
 				}
+				runsCacheRef.current.set(`${docId}:${pageIndex}`, cachedPage);
 				if (cancelled) return;
-				runsCacheRef.current.set(cacheKey, cachedPage);
-				runsByPage.set(pageIndex, cachedPage);
+				absorb(pageIndex, cachedPage);
+				publish(ink, glyphsByPage);
 			}
-			if (cancelled) return;
-			const next = new Map<string, string>();
-			const glyphsByPage = new Map<number, readonly GlyphRun[]>();
-			for (const pageIndex of pageIndexes) {
-				const page = runsByPage.get(pageIndex);
-				if (!page) continue;
-				glyphsByPage.set(pageIndex, page.glyphs);
-				for (const [key, color] of inkForTargets(
-					page.inkRuns,
-					targetsOnPage(pageIndex, citationLinks, textLinks),
-				)) {
-					next.set(key, color);
-				}
-			}
-			const signature = `${inkSignature(next)}\n${pageIndexes.join(",")}`;
-			if (signature === signatureRef.current) return;
-			signatureRef.current = signature;
-			setResult({ inkByKey: next, runsByPage: glyphsByPage });
 		})();
 
 		return () => {

@@ -24,10 +24,8 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { EMPTY_LAYOUT_REGIONS_BY_PAGE } from "@/components/viewer/pdf/constants";
-import { usePdfEngineContext } from "@/components/viewer/pdf/engine-provider";
 import { usePdfLayoutRegions } from "@/components/viewer/pdf/hooks/use-pdf-layout-regions";
 import { usePdfLayoutTranslate } from "@/components/viewer/pdf/hooks/use-pdf-layout-translate";
-import { usePdfLinkInk } from "@/components/viewer/pdf/hooks/use-pdf-link-ink";
 import { usePdfPaperTone } from "@/components/viewer/pdf/hooks/use-pdf-paper-tone";
 import { usePdfReadingMode } from "@/components/viewer/pdf/hooks/use-pdf-reading-mode";
 import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-sync";
@@ -45,6 +43,7 @@ import { DockviewViewport } from "@/components/viewer/pdf/viewport/dockview-view
 import { PanDragHandler } from "@/components/viewer/pdf/viewport/pan-handler";
 import { WheelZoomHandler } from "@/components/viewer/pdf/viewport/wheel-zoom-handler";
 import { openExternalUrl } from "@/lib/core/open-external";
+import { destinationInPageBox } from "@/lib/pdf/citation-dest-keys";
 import {
 	mirrorLayoutResultToTranslation,
 	translationSourceKey,
@@ -131,7 +130,6 @@ export function PdfTranslationViewerInner({
 	const { provides: docCap } = useDocumentManagerCapability();
 	const docCapRef = useRef(docCap);
 	docCapRef.current = docCap;
-	const { engine } = usePdfEngineContext();
 	// Interaction manager is registered; keep the capability subscribed so
 	// GlobalPointerProvider / pan-zoom gestures stay wired.
 	useInteractionManagerCapability();
@@ -231,16 +229,8 @@ export function PdfTranslationViewerInner({
 		() => getTranslatedLinkSource(sourceKey),
 		() => getTranslatedLinkSource(sourceKey),
 	);
-	const { inkByKey: linkInkByKey, runsByPage: glyphRunsByPage } = usePdfLinkInk(
-		{
-			engine,
-			docCapRef,
-			docId,
-			itemsByPage: layoutTranslateItemsByPage,
-			citationLinks: linkSource.citationLinks,
-			textLinks: linkSource.textLinks,
-		},
-	);
+	const linkInkByKey = linkSource.inkByKey;
+	const glyphRunsByPage = linkSource.glyphRunsByPage;
 
 	const pageMarks = useMemo<PdfPageMarksSlice>(
 		() => ({
@@ -272,15 +262,17 @@ export function PdfTranslationViewerInner({
 
 	const activateCitation = useCallback(
 		(link: PdfLinkAnnoObject) => {
-			const destination = getLinkDestination(link.target);
-			if (!destination) return;
+			const raw = getLinkDestination(link.target);
+			if (!raw) return;
+			// PDFium reports user space. EmbedPDF page size is the visible box,
+			// so a CropBox that does not start at (0, 0) has to be subtracted
+			// before the top-left conversion.
+			const destination = destinationInPageBox(raw, linkSource.pageOrigins);
 			const page =
 				docCapRef.current?.getDocument(docId)?.pages[destination.pageIndex];
 			const height = page?.size.height ?? 0;
 			const width = page?.size.width ?? 0;
 			const anchored = destination.pdfY > 0 || destination.pdfX != null;
-			// Destinations are PDF user space (origin bottom-left). scrollToPage
-			// takes the page box (origin top-left), same as layout-region jumps.
 			scrollRef.current?.scrollToPage({
 				pageNumber: destination.pageIndex + 1,
 				behavior: "instant",
@@ -299,7 +291,7 @@ export function PdfTranslationViewerInner({
 					: {}),
 			});
 		},
-		[docId],
+		[docId, linkSource.pageOrigins],
 	);
 
 	const pageHandlers = useMemo<PdfPageHandlers>(
