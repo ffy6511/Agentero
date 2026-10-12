@@ -39,6 +39,14 @@ describe("findPreservedLinkSpans", () => {
 		expect(spans.map((span) => span.text)).toEqual(["[2]"]);
 	});
 
+	it("keeps a PDF citation whose brackets are padded with spaces", () => {
+		expect(
+			findPreservedLinkSpans(
+				"engineering [ 6 , 13 , 15 , 45 ], live coding [ 3 ].",
+			).map((span) => span.text),
+		).toEqual(["[ 6 , 13 , 15 , 45 ]", "[ 3 ]"]);
+	});
+
 	it("keeps a balanced parenthesis that belongs to the url", () => {
 		const url = "https://en.wikipedia.org/wiki/Function_(mathematics)";
 		const text = `See ${url}.`;
@@ -128,6 +136,98 @@ describe("assignPreservedLinks", () => {
 		if (!fig) throw new Error("missing fig assignment");
 		expect(assignmentsWithin(assigned, fig.start, fig.end)).toEqual([
 			{ ...fig, start: 0, end: fig.text.length },
+		]);
+	});
+
+	it("splits a bracket group when same-line link tops differ by a fraction", () => {
+		const block = { x: 0.1, y: 0.3, w: 0.8, h: 0.12 };
+		const link = (
+			key: string,
+			x: number,
+			y: number,
+			w = 0.022,
+		): TranslateLinkBox => ({
+			key,
+			kind: "goto",
+			box: { x, y, w, h: 0.0105 },
+		});
+		// The single-digit cite sits a fraction higher. A raw top-edge sort
+		// would place it before the citations to its left.
+		const claimed = claimTranslateLinks(
+			[{ id: "p", bbox: block, readingOrder: 0 }],
+			[
+				link("n18", 0.1857, 0.3879),
+				link("n27", 0.2137, 0.3879),
+				link("n29", 0.2416, 0.3879),
+				link("n6", 0.639, 0.3876, 0.0127),
+				link("n13", 0.6576, 0.3879),
+				link("n15", 0.6856, 0.3879),
+				link("n45", 0.7135, 0.3879),
+				link("n3", 0.84, 0.3879, 0.0127),
+			],
+		);
+		const assigned = assignPreservedLinks(
+			"调用[18,27,29]，以及工程[6,13,15,45]和编码[3]。",
+			claimed.get("p") ?? [],
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["18", "n18"],
+			["27", "n27"],
+			["29", "n29"],
+			["6", "n6"],
+			["13", "n13"],
+			["15", "n15"],
+			["45", "n45"],
+			["[3]", "n3"],
+		]);
+	});
+
+	it("splits the bracket whose glyphs match even when an earlier link is still queued", () => {
+		const text = "见 [6,45] 和 [44]。";
+		const block = { x: 0.1, y: 0.7, w: 0.8, h: 0.1 };
+		const assigned = assignPreservedLinks(
+			text,
+			[
+				// Previous line, further right than this bracket. An x-only
+				// "past the token" check stops here and the group stays one link.
+				{
+					key: "above-right",
+					kind: "goto",
+					box: { x: 0.87, y: 0.745, w: 0.02, h: 0.011 },
+				},
+				{
+					key: "orphan",
+					kind: "goto",
+					box: { x: 0.2, y: 0.76, w: 0.02, h: 0.012 },
+				},
+				{
+					key: "n6",
+					kind: "goto",
+					box: { x: 0.298, y: 0.7737, w: 0.0127, h: 0.011 },
+				},
+				{
+					key: "n45",
+					kind: "goto",
+					box: { x: 0.3183, y: 0.774, w: 0.022, h: 0.011 },
+				},
+				{
+					key: "n44",
+					kind: "goto",
+					box: { x: 0.52, y: 0.774, w: 0.022, h: 0.011 },
+				},
+			],
+			{
+				block,
+				runs: [
+					{ text: "[6,45]", box: { x: 0.29, y: 0.7685, w: 0.05, h: 0.019 } },
+					{ text: "[44]", box: { x: 0.52, y: 0.7685, w: 0.03, h: 0.019 } },
+				],
+			},
+		);
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["6", "n6"],
+			["45", "n45"],
+			["[44]", "n44"],
 		]);
 	});
 

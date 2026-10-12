@@ -50,7 +50,7 @@ function parenBalance(text: string): number {
 	return balance;
 }
 const CITATION_LINK =
-	/[[［][0-9]+[a-z]?(?:\s*[-–—~,，]\s*[0-9]+[a-z]?)*[\]］]/gi;
+	/[[［]\s*[0-9]+[a-z]?(?:\s*[-–—~,，]\s*[0-9]+[a-z]?)*\s*[\]］]/gi;
 const REF_LINK =
 	/\b(?:Figures?|Figs?\.|Tables?|Tabs?\.|Sections?|Secs?\.|Equations?|Eqs?\.|Eqn?\.|Algorithms?|Algs?\.|Theorems?|Lemmas?|Appendices|Appendix)\s+\(?\d+(?:\.\d+)?[a-z]?(?:\s*[-–—]\s*\(?\d+(?:\.\d+)?[a-z]?)?\)?/gi;
 const AUTHOR_NAME = "(?:[A-Z][A-Za-z'’-]{1,40}|[\\u4e00-\\u9fff]{1,12})";

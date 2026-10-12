@@ -1,16 +1,21 @@
 /**
- * Raw PDF fill for each link that a translated page still has to paint.
- * Text runs are read once per mounted page and published as each page
- * finishes. The hex stays in PDF space; the overlay applies the paper tone
- * when it draws the token. The dual-pane companion reads the published
- * result instead of sampling the PDF a second time.
+ * Raw PDF fill for translated link tokens, plus the glyph runs that split
+ * adjacent citations.
+ *
+ * The visible page is read once while idle, before translation starts, so the
+ * overlay can paint link color with the first translated text. Further mounted
+ * pages are read only after a translation block exists. Runs stay cached: a new
+ * link map does not cancel an in-flight read or sample the page again. The hex
+ * stays in PDF space; the overlay applies the paper tone. The dual-pane
+ * companion reads the published result instead of sampling the PDF again.
  */
 
 import type { PdfEngine, PdfLinkAnnoObject } from "@embedpdf/models";
 import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
 import type { ScrollScope } from "@embedpdf/plugin-scroll";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { PdfTextLink } from "@/components/viewer/pdf/layers/citation-links";
+import { scheduleIdle } from "@/lib/core/idle";
 import {
 	type InkRun,
 	inkForTargets,
@@ -35,6 +40,39 @@ export type UsePdfLinkInkOptions = {
 	scrollRef: RefObject<ScrollScope | null>;
 	scrollReady: boolean;
 };
+
+/**
+ * Pages whose text runs should be read, visible pages first.
+ * A visible page is included before any translation block exists, so its fill
+ * is cached when the overlay first paints. Other mounted pages wait until they
+ * have both a block and a link.
+ */
+export function pagesToSampleInk(
+	visiblePageIndexes: readonly number[],
+	mountedPageIndexes: readonly number[],
+	itemsByPage: ReadonlyMap<number, readonly LayoutTranslateItem[]>,
+	citationLinks: ReadonlyMap<number, readonly PdfLinkAnnoObject[]>,
+	textLinks: ReadonlyMap<number, readonly PdfTextLink[]>,
+): number[] {
+	const pages: number[] = [];
+	const seen = new Set<number>();
+	for (const pageIndex of visiblePageIndexes) {
+		if (seen.has(pageIndex)) continue;
+		seen.add(pageIndex);
+		pages.push(pageIndex);
+	}
+	for (const pageIndex of mountedLinkPages(
+		itemsByPage,
+		citationLinks,
+		textLinks,
+		mountedPageIndexes,
+	)) {
+		if (seen.has(pageIndex)) continue;
+		seen.add(pageIndex);
+		pages.push(pageIndex);
+	}
+	return pages;
+}
 
 /**
  * Mounted pages that still have a translation block and at least one link.
@@ -86,6 +124,11 @@ function mountedPageIndexes(scope: ScrollScope): number[] {
 		(a, b) => Number(visible.has(b)) - Number(visible.has(a)) || a - b,
 	);
 	return pages;
+}
+
+/** 0-based pages currently in the viewport. `visiblePages` is 1-based. */
+function visiblePageIndexes(scope: ScrollScope): number[] {
+	return scope.getMetrics().visiblePages.map((page) => page - 1);
 }
 
 function targetsOnPage(
@@ -159,6 +202,14 @@ function glyphRunsFrom(
 	return glyphs;
 }
 
+function pageKeyOf(pages: readonly number[]): string {
+	return pages.join(",");
+}
+
+function parsePageKey(key: string): number[] {
+	return key ? key.split(",").map((value) => Number(value)) : [];
+}
+
 export function usePdfLinkInk({
 	engine,
 	docCapRef,
@@ -169,30 +220,132 @@ export function usePdfLinkInk({
 	scrollRef,
 	scrollReady,
 }: UsePdfLinkInkOptions): PdfLinkInkResult {
-	const [result, setResult] = useState<PdfLinkInkResult>(EMPTY_RESULT);
-	const [mountedKey, setMountedKey] = useState("");
+	const [cacheEpoch, setCacheEpoch] = useState(0);
+	const [scrollPages, setScrollPages] = useState({ visible: "", mounted: "" });
 	const runsCacheRef = useRef(new Map<string, CachedPage>());
+	const queueRef = useRef<number[]>([]);
+	const wantedRef = useRef(new Set<number>());
+	const pumpingRef = useRef(false);
+	const docIdRef = useRef(docId);
+	const engineRef = useRef(engine);
+	const aliveRef = useRef(true);
+	const immediateRef = useRef(false);
+	const idleCancelRef = useRef<(() => void) | null>(null);
 	const signatureRef = useRef("");
-	const pageKey = mountedLinkPages(
+	const stableRef = useRef(EMPTY_RESULT);
+	docIdRef.current = docId;
+	engineRef.current = engine;
+
+	const samplePages = pagesToSampleInk(
+		parsePageKey(scrollPages.visible),
+		parsePageKey(scrollPages.mounted),
 		itemsByPage,
 		citationLinks,
 		textLinks,
-		mountedKey ? mountedKey.split(",").map((value) => Number(value)) : [],
-	).join(",");
+	);
+	const sampleKey = pageKeyOf(samplePages);
+	const immediate = samplePages.some((pageIndex) => itemsByPage.has(pageIndex));
+	immediateRef.current = immediate;
+
+	const pumpRef = useRef<(() => void) | null>(null);
+	if (pumpRef.current == null) {
+		pumpRef.current = () => {
+			if (pumpingRef.current) return;
+			const engineNow = engineRef.current;
+			const docIdNow = docIdRef.current;
+			if (!engineNow || !docIdNow) return;
+			pumpingRef.current = true;
+			void (async () => {
+				let blocked = false;
+				let readOne = false;
+				try {
+					while (queueRef.current.length > 0) {
+						// Prefetch yields after one page so scrolling does not
+						// queue the rest of the buffer behind the raster worker.
+						if (readOne && !immediateRef.current) break;
+						const pageIndex = queueRef.current.shift();
+						if (pageIndex == null) break;
+						const activeDocId = docIdRef.current;
+						const activeEngine = engineRef.current;
+						if (!activeEngine || activeDocId !== docIdNow) break;
+						if (!wantedRef.current.has(pageIndex)) continue;
+						const cacheKey = `${activeDocId}:${pageIndex}`;
+						if (runsCacheRef.current.has(cacheKey)) continue;
+						const doc = docCapRef.current?.getDocument(activeDocId);
+						if (!doc) {
+							queueRef.current.unshift(pageIndex);
+							blocked = true;
+							break;
+						}
+						const page = doc.pages[pageIndex];
+						let cachedPage: CachedPage = { inkRuns: [], glyphs: [] };
+						readOne = true;
+						if (page && page.size.width > 0 && page.size.height > 0) {
+							try {
+								const pageRuns = await activeEngine
+									.getPageTextRuns(doc, page)
+									.toPromise();
+								const raw = pageRuns?.runs ?? [];
+								cachedPage = {
+									inkRuns: raw.map((run) => ({
+										rect: run.rect,
+										color: run.color,
+									})),
+									glyphs: glyphRunsFrom(raw, page.size.width, page.size.height),
+								};
+							} catch {
+								cachedPage = { inkRuns: [], glyphs: [] };
+							}
+						}
+						if (docIdRef.current !== activeDocId) continue;
+						runsCacheRef.current.set(cacheKey, cachedPage);
+						if (aliveRef.current) setCacheEpoch((epoch) => epoch + 1);
+					}
+				} finally {
+					pumpingRef.current = false;
+					const pending = queueRef.current.some(
+						(pageIndex) =>
+							wantedRef.current.has(pageIndex) &&
+							!runsCacheRef.current.has(`${docIdRef.current}:${pageIndex}`),
+					);
+					if (!blocked && pending) {
+						if (immediateRef.current) pumpRef.current?.();
+						else {
+							idleCancelRef.current?.();
+							idleCancelRef.current = scheduleIdle(() => {
+								idleCancelRef.current = null;
+								pumpRef.current?.();
+							}, 1500);
+						}
+					}
+				}
+			})();
+		};
+	}
+
+	useEffect(() => {
+		aliveRef.current = true;
+		return () => {
+			aliveRef.current = false;
+		};
+	}, []);
 
 	useEffect(() => {
 		if (!scrollReady || !docId) return;
 		const scope = scrollRef.current;
 		if (!scope) return;
 		const read = () => {
-			let next = "";
 			try {
-				next = mountedPageIndexes(scope).join(",");
+				const visible = pageKeyOf(visiblePageIndexes(scope));
+				const mounted = pageKeyOf(mountedPageIndexes(scope));
+				setScrollPages((prev) =>
+					prev.visible === visible && prev.mounted === mounted
+						? prev
+						: { visible, mounted },
+				);
 			} catch {
 				// Metrics throw until this document has a scroll layout.
-				return;
 			}
-			setMountedKey((prev) => (prev === next ? prev : next));
 		};
 		read();
 		const offScroll = scope.onScroll(() => read());
@@ -204,84 +357,60 @@ export function usePdfLinkInk({
 	}, [docId, scrollReady, scrollRef]);
 
 	useEffect(() => {
-		const pageIndexes = pageKey
-			? pageKey.split(",").map((value) => Number(value))
-			: [];
-		if (!engine || pageIndexes.length === 0) {
-			if (signatureRef.current !== "") {
-				signatureRef.current = "";
-				setResult(EMPTY_RESULT);
-			}
-			return;
+		idleCancelRef.current?.();
+		idleCancelRef.current = null;
+		const pages = parsePageKey(sampleKey);
+		wantedRef.current = new Set(pages);
+		const cacheKey = (pageIndex: number) => `${docId}:${pageIndex}`;
+		const ready = pages.some((pageIndex) =>
+			runsCacheRef.current.has(cacheKey(pageIndex)),
+		);
+		queueRef.current = pages.filter(
+			(pageIndex) => !runsCacheRef.current.has(cacheKey(pageIndex)),
+		);
+		// A read that finished between unmount and this effect still has to publish.
+		if (ready) setCacheEpoch((epoch) => epoch + 1);
+		if (!engine || queueRef.current.length === 0) return;
+		if (immediate) {
+			pumpRef.current?.();
+		} else {
+			idleCancelRef.current = scheduleIdle(() => {
+				idleCancelRef.current = null;
+				pumpRef.current?.();
+			}, 1500);
 		}
-		const doc = docCapRef.current?.getDocument(docId);
-		if (!doc) return;
-
-		let cancelled = false;
-		const publish = (
-			ink: ReadonlyMap<string, string>,
-			glyphsByPage: ReadonlyMap<number, readonly GlyphRun[]>,
-		) => {
-			if (cancelled) return;
-			const signature = `${inkSignature(ink)}\n${pageIndexes.join(",")}`;
-			if (signature === signatureRef.current) return;
-			signatureRef.current = signature;
-			setResult({
-				inkByKey: new Map(ink),
-				runsByPage: new Map(glyphsByPage),
-			});
-		};
-
-		void (async () => {
-			const ink = new Map<string, string>();
-			const glyphsByPage = new Map<number, readonly GlyphRun[]>();
-			const pending: number[] = [];
-			const absorb = (pageIndex: number, page: CachedPage) => {
-				glyphsByPage.set(pageIndex, page.glyphs);
-				for (const [key, color] of inkForTargets(
-					page.inkRuns,
-					targetsOnPage(pageIndex, citationLinks, textLinks),
-				)) {
-					ink.set(key, color);
-				}
-			};
-			for (const pageIndex of pageIndexes) {
-				const cached = runsCacheRef.current.get(`${docId}:${pageIndex}`);
-				if (cached) absorb(pageIndex, cached);
-				else pending.push(pageIndex);
-			}
-			publish(ink, glyphsByPage);
-			for (const pageIndex of pending) {
-				if (cancelled) return;
-				const page = doc.pages[pageIndex];
-				if (!page || !(page.size.width > 0) || !(page.size.height > 0)) {
-					continue;
-				}
-				let cachedPage: CachedPage = { inkRuns: [], glyphs: [] };
-				try {
-					const pageRuns = await engine.getPageTextRuns(doc, page).toPromise();
-					const raw = pageRuns?.runs ?? [];
-					cachedPage = {
-						inkRuns: raw.map((run) => ({
-							rect: run.rect,
-							color: run.color,
-						})),
-						glyphs: glyphRunsFrom(raw, page.size.width, page.size.height),
-					};
-				} catch {
-					cachedPage = { inkRuns: [], glyphs: [] };
-				}
-				runsCacheRef.current.set(`${docId}:${pageIndex}`, cachedPage);
-				if (cancelled) return;
-				absorb(pageIndex, cachedPage);
-				publish(ink, glyphsByPage);
-			}
-		})();
-
 		return () => {
-			cancelled = true;
+			idleCancelRef.current?.();
+			idleCancelRef.current = null;
 		};
-	}, [citationLinks, docCapRef, docId, engine, pageKey, textLinks]);
+	}, [docId, engine, immediate, sampleKey]);
 
-	return result;
+	return useMemo(() => {
+		// `cacheEpoch` is the signal that `runsCacheRef` gained a page.
+		void cacheEpoch;
+		const ink = new Map<string, string>();
+		const glyphsByPage = new Map<number, readonly GlyphRun[]>();
+		const cachedPages: number[] = [];
+		for (const pageIndex of parsePageKey(sampleKey)) {
+			const cached = runsCacheRef.current.get(`${docId}:${pageIndex}`);
+			if (!cached) continue;
+			cachedPages.push(pageIndex);
+			if (cached.glyphs.length > 0) glyphsByPage.set(pageIndex, cached.glyphs);
+			for (const [key, color] of inkForTargets(
+				cached.inkRuns,
+				targetsOnPage(pageIndex, citationLinks, textLinks),
+			)) {
+				ink.set(key, color);
+			}
+		}
+		const signature = `${docId}\n${inkSignature(ink)}\n${pageKeyOf(cachedPages)}`;
+		if (signature === signatureRef.current) return stableRef.current;
+		signatureRef.current = signature;
+		const next =
+			cachedPages.length === 0
+				? EMPTY_RESULT
+				: { inkByKey: ink, runsByPage: glyphsByPage };
+		stableRef.current = next;
+		return next;
+	}, [cacheEpoch, citationLinks, docId, sampleKey, textLinks]);
 }

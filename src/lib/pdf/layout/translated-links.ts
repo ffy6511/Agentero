@@ -74,8 +74,30 @@ function intersectionArea(a: NormBox, b: NormBox): number {
 	return w * h;
 }
 
-function byReading(a: TranslateLinkBox, b: TranslateLinkBox): number {
-	return a.box.y - b.box.y || a.box.x - b.box.x;
+/**
+ * Reading order. Rects on one line often differ by a fraction of a point, so
+ * sorting on raw top edges puts a later citation first and a bracket group
+ * collapses onto a single link.
+ */
+function sortByReading<T extends { box: NormBox }>(items: readonly T[]): T[] {
+	const sorted = [...items].sort(
+		(a, b) =>
+			a.box.y + a.box.h / 2 - (b.box.y + b.box.h / 2) || a.box.x - b.box.x,
+	);
+	const lines: T[][] = [];
+	for (const item of sorted) {
+		const cy = item.box.y + item.box.h / 2;
+		const line = lines[lines.length - 1];
+		const head = line?.[0];
+		const headCy = head ? head.box.y + head.box.h / 2 : 0;
+		const height = Math.max(head?.box.h ?? 0, item.box.h, 0.004);
+		if (!line || !head || Math.abs(cy - headCy) > height * 0.6) {
+			lines.push([item]);
+		} else {
+			line.push(item);
+		}
+	}
+	return lines.flatMap((line) => line.sort((a, b) => a.box.x - b.box.x));
 }
 
 /** Same hit rectangle. EmbedPDF can list one PDF link many times. */
@@ -137,7 +159,7 @@ export function claimTranslateLinks<T extends LinkHost>(
 		if (!host) continue;
 		map.get(host.id)?.push(link);
 	}
-	for (const list of map.values()) list.sort(byReading);
+	for (const [id, list] of map) map.set(id, sortByReading(list));
 	return map;
 }
 
@@ -292,14 +314,14 @@ function tokenChars(
 ): GlyphChar[] | null {
 	const needle = token.replace(/\s+/g, "");
 	if (!needle) return null;
-	const ordered = runs
-		.filter((run) => {
+	const ordered = sortByReading(
+		runs.filter((run) => {
 			if (!run.text) return false;
 			const cx = run.box.x + run.box.w / 2;
 			const cy = run.box.y + run.box.h / 2;
 			return contains(block, cx, cy);
-		})
-		.sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+		}),
+	);
 	const compact: GlyphChar[] = [];
 	let hay = "";
 	for (const run of ordered) {
@@ -342,7 +364,12 @@ function centerInChars(
 	);
 }
 
-/** Consecutive unread GoTo links whose centers sit on `chars`, capped at `limit`. */
+/**
+ * Unread GoTo links whose centers sit on `chars`, capped at `limit`.
+ * Links that are still queued from an earlier unmatched span are skipped
+ * until the first center that actually lands on this token. A link past the
+ * token ends the group, so a later citation is not pulled in.
+ */
 function linksInsideChars(
 	gotos: readonly TranslateLinkBox[],
 	start: number,
@@ -350,16 +377,41 @@ function linksInsideChars(
 	limit: number,
 	used: Set<string>,
 ): TranslateLinkBox[] {
-	if (limit < 2) return [];
+	if (limit < 2 || chars.length === 0) return [];
+	let tokenLeft = chars[0]?.box.x ?? 0;
+	let tokenRight = tokenLeft;
+	let tokenTop = chars[0]?.box.y ?? 0;
+	let tokenBottom = tokenTop;
+	for (const char of chars) {
+		tokenLeft = Math.min(tokenLeft, char.box.x);
+		tokenRight = Math.max(tokenRight, char.box.x + char.box.w);
+		tokenTop = Math.min(tokenTop, char.box.y);
+		tokenBottom = Math.max(tokenBottom, char.box.y + char.box.h);
+	}
+	const beforeToken = (link: TranslateLinkBox) => {
+		const cx = link.box.x + link.box.w / 2;
+		const cy = link.box.y + link.box.h / 2;
+		if (cy < tokenTop - 0.004) return true;
+		if (cy > tokenBottom + 0.004) return false;
+		return cx < tokenLeft - 0.01;
+	};
 	const group: TranslateLinkBox[] = [];
+	let started = false;
 	for (
 		let index = start;
 		index < gotos.length && group.length < limit;
 		index++
 	) {
 		const link = gotos[index];
-		if (!link || used.has(link.key)) break;
-		if (!centerInChars(link, chars)) break;
+		if (!link || used.has(link.key)) {
+			if (started) break;
+			continue;
+		}
+		if (!centerInChars(link, chars)) {
+			if (started || !beforeToken(link)) break;
+			continue;
+		}
+		started = true;
 		group.push(link);
 	}
 	return group;
@@ -462,7 +514,11 @@ function collectBindings(
 						),
 					);
 				}
-				gotoIndex += pieces.length;
+				const last = group[group.length - 1];
+				const lastAt = last
+					? gotos.findIndex((link) => link.key === last.key)
+					: -1;
+				gotoIndex = lastAt >= 0 ? lastAt + 1 : gotoIndex + pieces.length;
 				bindings.push({ text: span.text, start: span.start, parts });
 				continue;
 			}
