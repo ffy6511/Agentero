@@ -38,6 +38,27 @@ describe("findPreservedLinkSpans", () => {
 		const spans = findPreservedLinkSpans("[[1]] first [2] [[3]]");
 		expect(spans.map((span) => span.text)).toEqual(["[2]"]);
 	});
+
+	it("keeps a balanced parenthesis that belongs to the url", () => {
+		const url = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+		const text = `See ${url}.`;
+		expect(findPreservedLinkSpans(text).map((span) => span.url)).toEqual([url]);
+	});
+
+	it("strips an unmatched closing parenthesis after a url", () => {
+		const text = "See (https://example.com/a).";
+		expect(findPreservedLinkSpans(text).map((span) => span.url)).toEqual([
+			"https://example.com/a",
+		]);
+	});
+
+	it("keeps a balanced parenthesis inside a markdown url", () => {
+		const url = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+		const text = `Read [wiki](${url}).`;
+		const spans = findPreservedLinkSpans(text);
+		expect(spans.map((span) => span.url)).toEqual([url]);
+		expect(spans.map((span) => span.text)).toEqual([`[wiki](${url})`]);
+	});
 });
 
 describe("inline token masking of links", () => {
@@ -330,6 +351,34 @@ describe("assignPreservedLinks", () => {
 		);
 		expect(assigned.map((item) => [item.text, item.key])).toEqual([
 			["[9]", "n1"],
+		]);
+	});
+
+	it("does not bind an unlinked interval to the next citation", () => {
+		const text = "x ∈ [0,1] see [17].";
+		const block = { x: 0.1, y: 0.48, w: 0.7, h: 0.08 };
+		const runs = [
+			{ text: "[0,1]", box: { x: 0.2, y: 0.51, w: 0.08, h: 0.012 } },
+			{ text: "[17]", box: { x: 0.55, y: 0.51, w: 0.06, h: 0.012 } },
+		];
+		const links: TranslateLinkBox[] = [
+			{
+				key: "n17",
+				kind: "goto",
+				box: { x: 0.56, y: 0.51, w: 0.03, h: 0.012 },
+			},
+		];
+		const assigned = assignPreservedLinks(text, links, { block, runs });
+		expect(assigned.map((item) => [item.text, item.key])).toEqual([
+			["[17]", "n17"],
+		]);
+		const moved = assignPreservedLinks("区间 [0,1]，见 [17]。", links, {
+			source: text,
+			block,
+			runs,
+		});
+		expect(moved.map((item) => [item.text, item.key])).toEqual([
+			["[17]", "n17"],
 		]);
 	});
 

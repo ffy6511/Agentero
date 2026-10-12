@@ -15,8 +15,40 @@ export type PreservedLinkSpan = {
 	url?: string;
 };
 
-const MARKDOWN_LINK = /\[([^\]\n]{1,240})\]\((https?:\/\/[^\s)]+)\)/gi;
+const MARKDOWN_LINK = /\[([^\]\n]{1,240})\]\((https?:\/\/[^\s<>\]]+)\)/gi;
 const URL_LINK = /https?:\/\/[^\s、，。<>\]]+/gi;
+
+/**
+ * Drop sentence punctuation glued to a URL. A `)` stays when it closes a
+ * parenthesis that belongs to the URL (`Function_(mathematics)`); it is
+ * removed only when the slice has more closing parens than opening ones.
+ */
+export function trimPreservedUrl(raw: string): string {
+	let end = raw.length;
+	while (end > 0) {
+		const ch = raw[end - 1];
+		if (ch && /[.,;:!?]/.test(ch)) {
+			end--;
+			continue;
+		}
+		if (ch === ")" && parenBalance(raw.slice(0, end)) < 0) {
+			end--;
+			continue;
+		}
+		break;
+	}
+	return raw.slice(0, end);
+}
+
+/** Opening parens minus closing parens. Negative means a prose `)` is left over. */
+function parenBalance(text: string): number {
+	let balance = 0;
+	for (const ch of text) {
+		if (ch === "(") balance++;
+		else if (ch === ")") balance--;
+	}
+	return balance;
+}
 const CITATION_LINK =
 	/[[［][0-9]+[a-z]?(?:\s*[-–—~,，]\s*[0-9]+[a-z]?)*[\]］]/gi;
 const REF_LINK =
@@ -70,20 +102,27 @@ export function findPreservedLinkSpans(text: string): PreservedLinkSpan[] {
 	const found: PreservedLinkSpan[] = [];
 	pushMatches(text, MARKDOWN_LINK, "markdown", found, (match) => {
 		const start = match.index ?? 0;
-		const url = match[2]?.replace(/[.,;:!?]+$/, "");
+		let url = match[2] ?? "";
+		let end = start + match[0].length;
+		// The markdown closer can be a `)` that belongs to the URL. Pull those
+		// back in until the URL's parentheses balance.
+		while (parenBalance(url) > 0 && text[end] === ")") {
+			url += ")";
+			end += 1;
+		}
+		url = trimPreservedUrl(url);
 		if (!url) return null;
 		return {
 			kind: "markdown",
 			start,
-			end: start + match[0].length,
-			text: match[0],
+			end,
+			text: text.slice(start, end),
 			url,
 		};
 	});
 	pushMatches(text, URL_LINK, "url", found, (match) => {
 		const start = match.index ?? 0;
-		const raw = match[0];
-		const trimmed = raw.replace(/[.,;:!?)]+$/, "");
+		const trimmed = trimPreservedUrl(match[0]);
 		if (!trimmed) return null;
 		return {
 			kind: "url",

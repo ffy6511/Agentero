@@ -9,6 +9,7 @@
 import {
 	findPreservedLinkSpans,
 	type PreservedLinkSpan,
+	trimPreservedUrl,
 } from "@/lib/translate/preserved-links";
 
 export type NormBox = {
@@ -141,8 +142,9 @@ export function claimTranslateLinks<T extends LinkHost>(
 }
 
 function urlsMatch(a: string, b: string): boolean {
-	const trim = (url: string) => url.replace(/[.,;:!?)]+$/, "").toLowerCase();
-	return trim(a) === trim(b);
+	return (
+		trimPreservedUrl(a).toLowerCase() === trimPreservedUrl(b).toLowerCase()
+	);
 }
 
 function withLinkColor(
@@ -428,14 +430,14 @@ function collectBindings(
 	const bindings: SpanBinding[] = [];
 	for (const span of spans) {
 		const parts: BoundPart[] = [];
+		const occurrence = seenTokens.get(span.text) ?? 0;
+		seenTokens.set(span.text, occurrence + 1);
+		const chars =
+			context?.block && context.runs && context.runs.length > 0
+				? tokenChars(span.text, context.runs, context.block, occurrence)
+				: null;
 		const pieces = splittablePieces(span);
 		if (pieces) {
-			const occurrence = seenTokens.get(span.text) ?? 0;
-			seenTokens.set(span.text, occurrence + 1);
-			const chars =
-				context?.block && context.runs && context.runs.length > 0
-					? tokenChars(span.text, context.runs, context.block, occurrence)
-					: null;
 			const group = chars
 				? linksInsideChars(gotos, gotoIndex, chars, pieces.length, used)
 				: adjacentGotos(gotos, gotoIndex, pieces.length, used);
@@ -464,6 +466,16 @@ function collectBindings(
 				bindings.push({ text: span.text, start: span.start, parts });
 				continue;
 			}
+		}
+		// Glyphs located this span and no link center sits on it. An unlinked
+		// interval such as `[0,1]` must not consume the next real citation.
+		if (
+			!span.url &&
+			chars &&
+			!gotos.some((link) => !used.has(link.key) && centerInChars(link, chars))
+		) {
+			bindings.push({ text: span.text, start: span.start, parts: [] });
+			continue;
 		}
 		const hit = matchSpan(span, links, gotos, used, gotoIndex);
 		if (hit.gotoIndex !== gotoIndex) gotoIndex = hit.gotoIndex;
@@ -577,7 +589,8 @@ function assignBySourceIdentity(
  * takes one link per number when each of those links sits on that token's
  * glyphs. A following citation on the same line stays with its own token.
  * When the glyph count and the number count disagree, the whole token keeps
- * the first link.
+ * the first link. A span whose glyphs contain no link center stays plain, so
+ * an unlinked interval does not take the next citation.
  */
 export function assignPreservedLinks(
 	text: string,
