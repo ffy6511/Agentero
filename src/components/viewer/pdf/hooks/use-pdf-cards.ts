@@ -56,8 +56,9 @@ export type UsePdfCardsOptions = {
 	/** Cluster-owned chrome reset for the card being opened (ask / translate errors). */
 	onCardOpen: (card: ActiveSelectionCard) => void;
 	/**
-	 * Cluster-owned cleanup for the card being closed: discard an empty ask draft
-	 * or an unpinned translate, clear per-kind errors, close the note editor.
+	 * Cluster-owned cleanup for the card being closed: keep an empty ask draft
+	 * so its highlight stays, discard an unpinned translate, clear per-kind
+	 * errors, and close the note editor.
 	 */
 	onCardClose: (card: ActiveSelectionCard | null) => void;
 	/** Cancel an in-flight translate run when its card is replaced. */
